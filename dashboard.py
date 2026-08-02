@@ -21,6 +21,7 @@ Query-string support:
 
 import datetime as dt
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -28,6 +29,7 @@ import matplotlib.ticker as mticker
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from gex_calculator import (
     CBOE_INDEX_SYMBOLS,
@@ -40,6 +42,63 @@ from gex_calculator import (
 )
 
 st.set_page_config(page_title="GEX Dashboard", layout="wide")
+
+
+# --------------------------------------------------------------------------
+# Timezone helpers
+# --------------------------------------------------------------------------
+def _get_browser_timezone() -> str:
+    """
+    Detect browser timezone via a one-shot JS snippet that reloads the page
+    with ?tz=<iana>. If JS is disabled or the snippet hasn't fired yet,
+    fall back to America/New_York (EDT/EST).
+    """
+    qp_tz = st.query_params.get("tz")
+    if qp_tz:
+        return qp_tz
+
+    if "tz_detected" not in st.session_state:
+        st.session_state.tz_detected = True
+        components.html(
+            """
+            <script>
+            (function(){
+                const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                const url = new URL(window.location.href);
+                if (!url.searchParams.has('tz')) {
+                    url.searchParams.set('tz', tz);
+                    window.location.href = url.toString();
+                }
+            })();
+            </script>
+            """,
+            height=0,
+        )
+    return "America/New_York"
+
+
+def _format_local_time(naive_utc_dt: dt.datetime, tz_name: str) -> str:
+    """
+    Convert a naive UTC datetime to a formatted string in the given zone.
+    Falls back to America/New_York if the zone is unknown.
+    """
+    utc_dt = naive_utc_dt.replace(tzinfo=dt.timezone.utc)
+
+    for zone in (tz_name, "America/New_York"):
+        if not zone:
+            continue
+        try:
+            local_dt = utc_dt.astimezone(ZoneInfo(zone))
+            tz_abbr = local_dt.tzname() or ""
+            return local_dt.strftime(f"%Y-%m-%d %H:%M {tz_abbr}")
+        except Exception:
+            continue
+
+    return naive_utc_dt.strftime("%Y-%m-%d %H:%M UTC")
+
+
+# Resolve timezone once per session (persists after JS reload)
+browser_tz = _get_browser_timezone()
 
 # --------------------------------------------------------------------------
 # Sidebar: symbol
@@ -110,7 +169,10 @@ if str(min_oi) != qp.get("min_oi", ""):
 load = st.sidebar.button("Load / refresh chain", type="primary")
 
 st.sidebar.caption(
-    "Data: CBOE public delayed-quotes JSON feed , ~15-20min delayed. "
+    "Data: CBOE public delayed-quotes JSON feed "
+    "(cdn.cboe.com/api/global/delayed_quotes/options), ~15-20min delayed. "
+    "Works for cash indices (underscore-prefixed CBOE symbol) and any "
+    "equity/ETF ticker with listed options."
 )
 
 # --------------------------------------------------------------------------
@@ -302,6 +364,28 @@ def render_png_matplotlib(df_plot, result_obj, dpi=150):
     ax.legend(loc="lower right")
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
 
+    # --- Summary text box overlaid on the chart ----------------------------
+    net_sign = "+" if result_obj.total_gex >= 0 else ""
+    summary_lines = [
+        f"Spot: ${result_obj.spot:,.2f}",
+        f"Net GEX: {net_sign}${result_obj.total_gex:,.0f}mm  ({result_obj.regime.upper()})",
+        f"Call wall: ${result_obj.call_wall:,.0f}" if result_obj.call_wall else "Call wall: n/a",
+        f"Put wall: ${result_obj.put_wall:,.0f}" if result_obj.put_wall else "Put wall: n/a",
+        f"Gamma flip: ${result_obj.gamma_flip:,.0f}" if result_obj.gamma_flip else "Gamma flip: n/a",
+    ]
+    summary_text = "\n".join(summary_lines)
+
+    props = dict(boxstyle="round,pad=0.5", facecolor="#f7f7f7", edgecolor="#cccccc", alpha=0.95)
+    ax.text(
+        0.98, 0.98, summary_text,
+        transform=ax.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        horizontalalignment="right",
+        bbox=props,
+        family="monospace",
+    )
+
     buf = BytesIO()
     fig_mpl.tight_layout()
     fig_mpl.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
@@ -324,7 +408,8 @@ st.download_button(
 # Footer
 # --------------------------------------------------------------------------
 exp_str = ", ".join(_fmt(e) for e in sorted(selected))
-st.caption(f"As of {result.as_of.strftime('%Y-%m-%d %H:%M UTC')} · Expirations included: {exp_str}")
+as_of_local = _format_local_time(result.as_of, browser_tz)
+st.caption(f"As of {as_of_local} · Expirations included: {exp_str}")
 
 if result.warnings:
     with st.expander("Warnings"):

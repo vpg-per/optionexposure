@@ -367,11 +367,9 @@ def render_png_matplotlib(df_plot, result_obj, dpi=150):
     # --- Summary text box overlaid on the chart ----------------------------
     net_sign = "+" if result_obj.total_gex >= 0 else ""
     summary_lines = [
-        f"Spot: ${result_obj.spot:,.2f}",
-        f"Net GEX: {net_sign}${result_obj.total_gex:,.0f}mm  ({result_obj.regime.upper()})",
+        f"Net GEX: {net_sign}${result_obj.total_gex:,.0f}mm",
         f"Call wall: ${result_obj.call_wall:,.0f}" if result_obj.call_wall else "Call wall: n/a",
         f"Put wall: ${result_obj.put_wall:,.0f}" if result_obj.put_wall else "Put wall: n/a",
-        f"Gamma flip: ${result_obj.gamma_flip:,.0f}" if result_obj.gamma_flip else "Gamma flip: n/a",
     ]
     summary_text = "\n".join(summary_lines)
 

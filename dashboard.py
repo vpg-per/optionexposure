@@ -169,10 +169,7 @@ if str(min_oi) != qp.get("min_oi", ""):
 load = st.sidebar.button("Load / refresh chain", type="primary")
 
 st.sidebar.caption(
-    "Data: CBOE public delayed-quotes JSON feed "
-    "(cdn.cboe.com/api/global/delayed_quotes/options), ~15-20min delayed. "
-    "Works for cash indices (underscore-prefixed CBOE symbol) and any "
-    "equity/ETF ticker with listed options."
+    "Data: CBOE public delayed-quotes JSON feed ~15-20min delayed. "
 )
 
 # --------------------------------------------------------------------------

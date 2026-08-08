@@ -232,8 +232,8 @@ quick_cols = st.columns(4)
 if quick_cols[0].button("0DTE only"):
     st.session_state.selected_expirations = [e for e, l in labels.items() if l == "0DTE"] or all_expirations[:1]
     st.rerun()
-if quick_cols[1].button("0DTE + 1DTE"):
-    st.session_state.selected_expirations = [e for e, l in labels.items() if l in ("0DTE", "1DTE")] or all_expirations[:1]
+if quick_cols[1].button("1DTE"):
+    st.session_state.selected_expirations = [e for e, l in labels.items() if l == "1DTE"] or all_expirations[:1]
     st.rerun()
 if quick_cols[2].button("This Friday"):
     st.session_state.selected_expirations = [e for e, l in labels.items() if l == "This Fri"] or all_expirations[:1]

@@ -36,8 +36,11 @@ Methodology (standard dealer-gamma convention):
 from __future__ import annotations
 
 import datetime as dt
+import json
+import os
 import re
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -47,6 +50,19 @@ from scipy.stats import norm
 CONTRACT_SIZE = 100
 CBOE_BASE_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
 USER_AGENT = "Mozilla/5.0 (compatible; gex-dashboard/1.0)"
+DEFAULT_JSON_SAVE_DIR = "cboe_data"
+EASTERN_TZ = ZoneInfo("America/New_York")
+
+
+def utc_naive_to_eastern_naive(utc_naive: dt.datetime) -> dt.datetime:
+    """
+    Converts a naive UTC datetime (the convention used throughout this
+    module, e.g. `ChainData.as_of`) into a naive Eastern-time datetime
+    (America/New_York, so it auto-adjusts for EDT/EST). Used for filenames
+    and any other place we want "market time" instead of UTC or the
+    server's local time.
+    """
+    return utc_naive.replace(tzinfo=dt.timezone.utc).astimezone(EASTERN_TZ).replace(tzinfo=None)
 
 # Common index tickers -> their CBOE JSON symbol (leading underscore).
 CBOE_INDEX_SYMBOLS = {
@@ -128,11 +144,54 @@ class GexResult:
 # --------------------------------------------------------------------------
 # CBOE fetch
 # --------------------------------------------------------------------------
-def fetch_cboe_json(symbol: str, session: requests.Session | None = None, timeout: int = 15) -> dict:
+def save_raw_json(
+    payload: dict,
+    symbol: str,
+    save_dir: str = DEFAULT_JSON_SAVE_DIR,
+    downloaded_at: dt.datetime | None = None,
+) -> str:
+    """
+    Writes the raw CBOE JSON payload to disk, with the download timestamp
+    baked into the filename (so repeated fetches of the same symbol don't
+    overwrite each other): e.g. cboe_data/SPY_20260905_143512.json
+
+    The timestamp in the filename is always Eastern time (America/New_York,
+    auto-adjusting for EDT/EST) with no timezone label -- just the plain
+    YYYYMMDD_HHMMSS digits, matching U.S. market hours. `downloaded_at`
+    should be given as naive UTC (matches `ChainData.as_of`'s convention);
+    it's converted internally. Defaults to "now" if not given.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    utc_ts = downloaded_at or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    eastern_ts = utc_naive_to_eastern_naive(utc_ts)
+    ts_str = eastern_ts.strftime("%Y%m%d_%H%M%S")
+    # symbol may start with "_" (index) -- strip for a friendlier filename
+    clean_symbol = symbol.lstrip("_") or symbol
+    filename = f"{clean_symbol}_{ts_str}.json"
+    path = os.path.join(save_dir, filename)
+
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp_path, path)  # atomic on POSIX -- avoids partial-write corruption
+    return path
+
+
+def fetch_cboe_json(
+    symbol: str,
+    session: requests.Session | None = None,
+    timeout: int = 15,
+    save_json: bool = False,
+    save_dir: str = DEFAULT_JSON_SAVE_DIR,
+) -> tuple[dict, str | None]:
     """
     Hits CBOE's public delayed-quotes JSON endpoint for a single symbol.
     `symbol` should already be resolved (e.g. "_SPX", "SPY") -- use
     `resolve_cboe_symbol()` first if you have a bare ticker.
+
+    If `save_json` is True, the raw payload is written to `save_dir` with
+    the current timestamp in the filename. Returns (payload, saved_path)
+    where saved_path is None when `save_json` is False.
     """
     url = CBOE_BASE_URL.format(symbol=symbol)
     sess = session or requests
@@ -141,7 +200,12 @@ def fetch_cboe_json(symbol: str, session: requests.Session | None = None, timeou
     payload = resp.json()
     if "data" not in payload or "options" not in payload["data"]:
         raise ValueError(f"Unexpected CBOE response shape for symbol '{symbol}'.")
-    return payload
+
+    saved_path = None
+    if save_json:
+        saved_path = save_raw_json(payload, symbol, save_dir=save_dir)
+
+    return payload, saved_path
 
 
 def cboe_json_to_dataframe(payload: dict) -> tuple[pd.DataFrame, float]:
@@ -184,6 +248,7 @@ class ChainData:
     as_of: dt.datetime
     raw: pd.DataFrame        # strike, expiry, type, open_interest, iv, gamma, gex_mm
     warnings: list = field(default_factory=list)
+    saved_json_path: str | None = None   # path the raw payload was written to, if any
 
 
 def fetch_chain(
@@ -191,6 +256,8 @@ def fetch_chain(
     is_index: bool | None = None,
     risk_free_rate: float = 0.05,
     session: requests.Session | None = None,
+    save_json: bool = False,
+    save_dir: str = DEFAULT_JSON_SAVE_DIR,
 ) -> ChainData:
     """
     Pulls the FULL option chain (every expiration CBOE lists) for `ticker`
@@ -201,11 +268,17 @@ def fetch_chain(
     `is_index`: True forces the CBOE index symbol format (leading
     underscore, e.g. "_SPX"); False forces the plain equity/ETF format;
     None auto-detects using the known index list (SPX, NDX, RUT, VIX, ...).
+
+    `save_json`: if True, writes the raw CBOE JSON response to `save_dir`
+    with the download timestamp in the filename, e.g.
+    "cboe_data/SPY_20260905_143512.json".
     """
     warnings: list[str] = []
     symbol = resolve_cboe_symbol(ticker, is_index=is_index)
 
-    payload = fetch_cboe_json(symbol, session=session)
+    payload, saved_json_path = fetch_cboe_json(
+        symbol, session=session, save_json=save_json, save_dir=save_dir
+    )
     raw, spot = cboe_json_to_dataframe(payload)
 
     if spot <= 0:
@@ -241,7 +314,15 @@ def fetch_chain(
     raw["gex_raw"] = np.where(raw["type"] == "put", -raw["gex_raw"], raw["gex_raw"])
     raw["gex_mm"] = raw["gex_raw"] / 1_000_000
 
-    return ChainData(ticker=ticker.upper(), symbol=symbol, spot=float(spot), as_of=now, raw=raw, warnings=warnings)
+    return ChainData(
+        ticker=ticker.upper(),
+        symbol=symbol,
+        spot=float(spot),
+        as_of=now,
+        raw=raw,
+        warnings=warnings,
+        saved_json_path=saved_json_path,
+    )
 
 
 # --------------------------------------------------------------------------

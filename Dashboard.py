@@ -151,12 +151,10 @@ if qp_symbol != ticker:
     st.query_params["symbol"] = ticker
 
 min_oi = strike_window = st.sidebar.number_input(
-    "Strikes to show around spot (each side) / Min open interest per strike",
+    "Strikes to show around spot (each side)",
     min_value=0,
     value=int(qp_strikes) if qp_strikes.isdigit() else 10,
     step=1,
-    help="One value used for both: how many strikes to show on each side "
-         "of spot, and the minimum open-interest filter per strike.",
 )
 if str(strike_window) != qp.get("strikes", ""):
     st.query_params["strikes"] = str(strike_window)
@@ -164,9 +162,6 @@ if str(strike_window) != qp.get("strikes", ""):
 save_json_to_disk = st.sidebar.checkbox(
     "Save downloaded JSON to disk",
     value=True,
-    help="Writes the raw CBOE response to disk each time it's fetched, "
-         "with the download timestamp in the filename (e.g. "
-         "cboe_data/SPY_20260905_143512.json).",
 )
 
 load = st.sidebar.button("Load / refresh chain", type="primary")

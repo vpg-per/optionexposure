@@ -310,7 +310,10 @@ fig.update_layout(
     yaxis_title=f"{result.ticker} price",
     xaxis_title="Dealer GEX ($mm per 1% move)",
         yaxis=dict(
-        range=[df["strike"].min() - 1, df["strike"].max() + 1] if not df.empty else None,
+        # Reversed range (max first, min last) so strikes read top-to-bottom
+        # in ascending order, matching the matplotlib PNG (which uses
+        # invert_yaxis()) used for the Telegram export.
+        range=[df["strike"].max() + 1, df["strike"].min() - 1] if not df.empty else None,
         autorange=False,
     ),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),

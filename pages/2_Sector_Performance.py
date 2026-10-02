@@ -100,6 +100,16 @@ def render_sector_chart(compact: bool = False, key_prefix: str = "sector") -> No
 
     st.image(png_bytes, use_container_width=True)
 
+    # Lets SectorProcessor (Playwright) fetch the PNG by clicking this button.
+    st.download_button(
+        "Download chart",
+        data=png_bytes,
+        file_name="sector_performance.png",
+        mime="image/png",
+        key=f"{key_prefix}_download",
+        on_click="ignore",  # don't rerun the script (and rebuild) on click; needs Streamlit >= 1.43
+    )
+
     if compact:
         st.caption("See the **Sector Performance** page (sidebar) for the full-size chart.")
 

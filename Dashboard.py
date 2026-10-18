@@ -30,6 +30,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
+from db import insert_snapshot
 from gex_calculator import (
     CBOE_INDEX_SYMBOLS,
     compute_gex,
@@ -40,7 +41,7 @@ from gex_calculator import (
     nearest_strikes,
 )
 
-st.set_page_config(page_title="GEX Dashboard", layout="wide")
+st.set_page_config(page_title="Dashboard", layout="wide")
 
 
 # --------------------------------------------------------------------------
@@ -100,9 +101,9 @@ def _format_local_time(naive_utc_dt: dt.datetime, tz_name: str) -> str:
 browser_tz = _get_browser_timezone()
 
 # --------------------------------------------------------------------------
-# Sidebar: symbol
+# Controls (main page, not sidebar): symbol, strikes, load / refresh
 # --------------------------------------------------------------------------
-st.sidebar.title("GEX Dashboard")
+st.title("Gamma exposure (GEX) by strike")
 
 PRESETS = {
     "SPY": ("SPY", False),
@@ -132,43 +133,37 @@ if qp_symbol:
         custom_ticker_default = qp_symbol
         custom_is_index_default = qp_symbol in CBOE_INDEX_SYMBOLS
 
-preset_label = st.sidebar.selectbox("Symbol", list(PRESETS.keys()), index=preset_index)
+ctl_symbol, ctl_strikes, ctl_load = st.columns([2, 2, 1], vertical_alignment="bottom")
+
+preset_label = ctl_symbol.selectbox("Symbol", list(PRESETS.keys()), index=preset_index)
+
+min_oi = strike_window = ctl_strikes.number_input(
+    "Strikes to show around spot (each side)",
+    min_value=0,
+    value=int(qp_strikes) if qp_strikes.isdigit() else 10,
+    step=1,
+)
+
+load = ctl_load.button("Load / refresh chain", type="primary", use_container_width=True)
 
 if PRESETS[preset_label] is None:
-    ticker = st.sidebar.text_input(
+    cust_symbol, cust_index = st.columns([2, 3], vertical_alignment="bottom")
+    ticker = cust_symbol.text_input(
         "Enter symbol (e.g. SPX, SPY, AAPL, TSLA)",
         value=custom_ticker_default,
     ).strip().upper()
-    is_index = st.sidebar.checkbox(
+    is_index = cust_index.checkbox(
         "This is a cash index (adds CBOE's leading underscore)",
         value=custom_is_index_default or (ticker in CBOE_INDEX_SYMBOLS),
     )
 else:
     ticker, is_index = PRESETS[preset_label]
 
-# Sync effective symbol back to URL query string
+# Sync effective symbol / strikes back to URL query string
 if qp_symbol != ticker:
     st.query_params["symbol"] = ticker
-
-min_oi = strike_window = st.sidebar.number_input(
-    "Strikes to show around spot (each side)",
-    min_value=0,
-    value=int(qp_strikes) if qp_strikes.isdigit() else 10,
-    step=1,
-)
 if str(strike_window) != qp.get("strikes", ""):
     st.query_params["strikes"] = str(strike_window)
-
-save_json_to_disk = st.sidebar.checkbox(
-    "Save downloaded JSON to disk",
-    value=True,
-)
-
-load = st.sidebar.button("Load / refresh chain", type="primary")
-
-st.sidebar.caption(
-    "Data: CBOE public delayed-quotes JSON feed ~15-20min delayed. "
-)
 
 # --------------------------------------------------------------------------
 # Fetch full chain (auto-load on first run; manual refresh via button)
@@ -185,7 +180,7 @@ if should_fetch:
     with st.spinner(f"Fetching option chain for {ticker}..."):
         try:
             st.session_state.chain = fetch_chain(
-                ticker=ticker, is_index=is_index, save_json=save_json_to_disk
+                ticker=ticker, is_index=is_index, save_json=False
             )
             st.session_state.chain_error = None
             st.session_state.selected_expirations = None
@@ -193,14 +188,28 @@ if should_fetch:
             st.session_state.chain = None
             st.session_state.chain_error = str(e)
 
-st.title("Gamma exposure (GEX) by strike")
+    # Persist this snapshot (spot, call/put volume, timestamp) to Neon.
+    # Only runs when a fetch actually happened -- not on every widget rerun.
+    if st.session_state.chain is not None:
+        _c = st.session_state.chain
+        try:
+            insert_snapshot(
+                symbol=_c.ticker,
+                snapshot_at_utc=_c.as_of,
+                spot=_c.spot,
+                call_volume=_c.call_volume,
+                put_volume=_c.put_volume,
+                source="dashboard",
+            )
+        except Exception as db_err:  # noqa: BLE001
+            st.warning(f"Could not save snapshot to database: {db_err}")
 
 if st.session_state.chain_error:
     st.error(st.session_state.chain_error)
 
 chain = st.session_state.chain
 if chain is None:
-    st.info("Choose a symbol in the sidebar and click **Load / refresh chain**.")
+    st.info("Choose a symbol above and click **Load / refresh chain**.")
     st.stop()
 
 # --------------------------------------------------------------------------
@@ -247,7 +256,7 @@ if not selected:
     st.stop()
 
 # --------------------------------------------------------------------------
-# Strike window: reuses the single merged sidebar value (strike_window)
+# Strike window: reuses the single merged control value (strike_window)
 # --------------------------------------------------------------------------
 strike_count = strike_window
 
@@ -400,8 +409,6 @@ st.download_button(
 exp_str = ", ".join(_fmt(e) for e in sorted(selected))
 as_of_local = _format_local_time(result.as_of, browser_tz)
 footer = f"As of {as_of_local} · Expirations included: {exp_str}"
-if chain.saved_json_path:
-    footer += f" · Raw JSON saved to `{chain.saved_json_path}`"
 st.caption(footer)
 
 if result.warnings:

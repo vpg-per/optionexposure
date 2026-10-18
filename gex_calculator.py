@@ -208,6 +208,21 @@ def fetch_cboe_json(
     return payload, saved_path
 
 
+def sum_option_volumes(payload: dict) -> tuple[int, int]:
+    """Total (call_volume, put_volume) across every contract/expiration in a CBOE payload."""
+    call_vol = put_vol = 0
+    for opt in payload["data"].get("options", []):
+        parsed = parse_occ_symbol(opt.get("option", ""))
+        if parsed is None:
+            continue
+        vol = opt.get("volume", 0) or 0
+        if parsed["type"] == "call":
+            call_vol += vol
+        else:
+            put_vol += vol
+    return int(call_vol), int(put_vol)
+
+
 def cboe_json_to_dataframe(payload: dict) -> tuple[pd.DataFrame, float]:
     """
     Flattens the CBOE JSON payload into a per-contract dataframe with
@@ -249,6 +264,8 @@ class ChainData:
     raw: pd.DataFrame        # strike, expiry, type, open_interest, iv, gamma, gex_mm
     warnings: list = field(default_factory=list)
     saved_json_path: str | None = None   # path the raw payload was written to, if any
+    call_volume: int = 0     # total call volume, all strikes/expirations
+    put_volume: int = 0      # total put volume, all strikes/expirations
 
 
 def fetch_chain(
@@ -280,6 +297,7 @@ def fetch_chain(
         symbol, session=session, save_json=save_json, save_dir=save_dir
     )
     raw, spot = cboe_json_to_dataframe(payload)
+    call_volume, put_volume = sum_option_volumes(payload)
 
     if spot <= 0:
         raise ValueError(f"Could not resolve a spot price for '{ticker}' ({symbol}).")
@@ -322,6 +340,8 @@ def fetch_chain(
         raw=raw,
         warnings=warnings,
         saved_json_path=saved_json_path,
+        call_volume=call_volume,
+        put_volume=put_volume,
     )
 
 

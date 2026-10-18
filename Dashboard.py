@@ -39,6 +39,7 @@ from gex_calculator import (
     label_expirations,
     list_expirations,
     nearest_strikes,
+    volume_by_scope,
 )
 
 st.set_page_config(page_title="Dashboard", layout="wide")
@@ -193,14 +194,16 @@ if should_fetch:
     if st.session_state.chain is not None:
         _c = st.session_state.chain
         try:
-            insert_snapshot(
-                symbol=_c.ticker,
-                snapshot_at_utc=_c.as_of,
-                spot=_c.spot,
-                call_volume=_c.call_volume,
-                put_volume=_c.put_volume,
-                source="dashboard",
-            )
+            for _code, (_cv, _pv) in volume_by_scope(_c).items():
+                insert_snapshot(
+                    symbol=_c.ticker,
+                    snapshot_at_utc=_c.as_of,
+                    spot=_c.spot,
+                    call_volume=_cv,
+                    put_volume=_pv,
+                    source="dashboard",
+                    scope=_code,
+                )
         except Exception as db_err:  # noqa: BLE001
             st.warning(f"Could not save snapshot to database: {db_err}")
 
@@ -286,29 +289,48 @@ regime_note = (
 )
 st.caption(regime_note)
 
-# --- Horizontal bar chart: price on y-axis, GEX on x-axis ------------------
+# --- Metric toggle: GEX / Open interest / Volume ---------------------------
+METRICS = {
+    # label: (call col, put col, x-axis title, hover format, is_gex)
+    "GEX": ("call_gex", "put_gex", "Dealer GEX ($mm per 1% move)", "$%{x:.1f}mm", True),
+    "Open interest": ("call_oi", "put_oi", "Open interest (contracts)", "%{x:,.0f}", False),
+    "Volume": ("call_volume", "put_volume", "Volume (contracts)", "%{x:,.0f}", False),
+}
+metric = st.radio("Bar chart shows", list(METRICS.keys()), horizontal=True)
+call_col, put_col, x_title, hover_fmt, is_gex = METRICS[metric]
+
+# GEX puts are already negative. For OI / volume, mirror puts to the left of
+# zero so the chart keeps the same call-right / put-left layout.
+call_vals = df[call_col]
+put_vals = df[put_col] if is_gex else -df[put_col]
+put_hover = put_vals.abs() if not is_gex else put_vals
+
+# --- Horizontal bar chart: price on y-axis, metric on x-axis ---------------
 fig = go.Figure()
 
 fig.add_bar(
-    y=df["strike"], x=df["call_gex"],
+    y=df["strike"], x=call_vals,
     orientation="h",
-    name="Call GEX",
+    name=f"Call {metric}",
     marker_color="#1D9E75",
-    hovertemplate="Strike %{y}<br>Call GEX $%{x:.1f}mm<extra></extra>",
+    hovertemplate=f"Strike %{{y}}<br>Call {metric} {hover_fmt}<extra></extra>",
 )
 fig.add_bar(
-    y=df["strike"], x=df["put_gex"],
+    y=df["strike"], x=put_vals,
     orientation="h",
-    name="Put GEX",
+    name=f"Put {metric}",
     marker_color="#D85A30",
-    hovertemplate="Strike %{y}<br>Put GEX $%{x:.1f}mm<extra></extra>",
+    customdata=put_hover,
+    hovertemplate=f"Strike %{{y}}<br>Put {metric} "
+                  + ("$%{customdata:.1f}mm" if is_gex else "%{customdata:,.0f}")
+                  + "<extra></extra>",
 )
 
 fig.add_hline(
     y=result.spot, line_width=2, line_dash="dot", line_color="#378ADD",
     annotation_text="Spot", annotation_position="right",
 )
-if result.gamma_flip is not None and not df.empty and df["strike"].min() <= result.gamma_flip <= df["strike"].max():
+if is_gex and result.gamma_flip is not None and not df.empty and df["strike"].min() <= result.gamma_flip <= df["strike"].max():
     fig.add_hline(
         y=result.gamma_flip, line_width=2, line_dash="dash", line_color="#2C2C2A",
         annotation_text="Gamma flip", annotation_position="left",
@@ -317,8 +339,8 @@ if result.gamma_flip is not None and not df.empty and df["strike"].min() <= resu
 fig.update_layout(
     barmode="relative",
     yaxis_title=f"{result.ticker} price",
-    xaxis_title="Dealer GEX ($mm per 1% move)",
-        yaxis=dict(
+    xaxis_title=x_title,
+    yaxis=dict(
         # Reversed range (max first, min last) so strikes read top-to-bottom
         # in ascending order, matching the matplotlib PNG (which uses
         # invert_yaxis()) used for the Telegram export.
@@ -336,7 +358,7 @@ st.plotly_chart(fig, use_container_width=True)
 # --------------------------------------------------------------------------
 # PNG download helper (matplotlib backend -- no browser / kaleido needed)
 # --------------------------------------------------------------------------
-def render_png_matplotlib(df_plot, result_obj, dpi=150):
+def render_png_matplotlib(df_plot, result_obj, metric_name, dpi=150):
     matplotlib.use("Agg")
     n = len(df_plot)
     fig_h = max(6, 0.35 * n)
@@ -345,13 +367,15 @@ def render_png_matplotlib(df_plot, result_obj, dpi=150):
     y_pos = np.arange(n)
     bar_h = 0.75
 
-    ax.barh(y_pos, df_plot["call_gex"], height=bar_h, color="#1D9E75", label="Call GEX")
-    ax.barh(y_pos, df_plot["put_gex"], height=bar_h, color="#D85A30", label="Put GEX")
+    c_col, p_col, x_label, _, gex_mode = METRICS[metric_name]
+    put_series = df_plot[p_col] if gex_mode else -df_plot[p_col]
+    ax.barh(y_pos, df_plot[c_col], height=bar_h, color="#1D9E75", label=f"Call {metric_name}")
+    ax.barh(y_pos, put_series, height=bar_h, color="#D85A30", label=f"Put {metric_name}")
 
     ax.axhline(y_pos[np.argmin(np.abs(df_plot["strike"].to_numpy() - result_obj.spot))],
                color="#378ADD", linestyle=":", linewidth=2, label="Spot")
 
-    if result_obj.gamma_flip is not None:
+    if gex_mode and result_obj.gamma_flip is not None:
         flip_idx = np.argmin(np.abs(df_plot["strike"].to_numpy() - result_obj.gamma_flip))
         ax.axhline(y_pos[flip_idx], color="#2C2C2A", linestyle="--", linewidth=2, label="Gamma flip")
 
@@ -360,18 +384,29 @@ def render_png_matplotlib(df_plot, result_obj, dpi=150):
     ax.set_yticklabels([f"{s:,.0f}" for s in df_plot["strike"]])
     ax.invert_yaxis()
     ax.set_ylabel(f"{result_obj.ticker} price")
-    ax.set_xlabel("Dealer GEX ($mm per 1% move)")
-    ax.set_title(f"{result_obj.ticker} GEX by strike")
+    ax.set_xlabel(x_label)
+    ax.set_title(f"{result_obj.ticker} {metric_name} by strike")
     ax.legend(loc="lower right")
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    if gex_mode:
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    else:
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{abs(x):,.0f}"))
 
     # --- Summary text box overlaid on the chart ----------------------------
     net_sign = "+" if result_obj.total_gex >= 0 else ""
-    summary_lines = [
-        f"Net GEX: {net_sign}${result_obj.total_gex:,.0f}mm",
-        f"Call wall: ${result_obj.call_wall:,.0f}" if result_obj.call_wall else "Call wall: n/a",
-        f"Put wall: ${result_obj.put_wall:,.0f}" if result_obj.put_wall else "Put wall: n/a",
-    ]
+    if gex_mode:
+        summary_lines = [
+            f"Net GEX: {net_sign}${result_obj.total_gex:,.0f}mm",
+            f"Call wall: ${result_obj.call_wall:,.0f}" if result_obj.call_wall else "Call wall: n/a",
+            f"Put wall: ${result_obj.put_wall:,.0f}" if result_obj.put_wall else "Put wall: n/a",
+        ]
+    else:
+        c_tot, p_tot = int(df_plot[c_col].sum()), int(df_plot[p_col].sum())
+        summary_lines = [
+            f"Calls: {c_tot:,}",
+            f"Puts: {p_tot:,}",
+            f"Put/Call: {p_tot / c_tot:.2f}" if c_tot else "Put/Call: n/a",
+        ]
     summary_text = "\n".join(summary_lines)
 
     props = dict(boxstyle="round,pad=0.5", facecolor="#f7f7f7", edgecolor="#cccccc", alpha=0.95)
@@ -394,11 +429,11 @@ def render_png_matplotlib(df_plot, result_obj, dpi=150):
 
 # --- Download PNG ----------------------------------------------------------
 st.divider()
-png_bytes = render_png_matplotlib(df, result)
+png_bytes = render_png_matplotlib(df, result, metric)
 st.download_button(
     label="📥 Download chart (PNG)",
     data=png_bytes,
-    file_name=f"{result.ticker}_GEX_{result.as_of.strftime('%Y%m%d_%H%M')}.png",
+    file_name=f"{result.ticker}_{metric.replace(' ', '')}_{result.as_of.strftime('%Y%m%d_%H%M')}.png",
     mime="image/png",
     use_container_width=True,
 )

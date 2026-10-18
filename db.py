@@ -55,11 +55,13 @@ def insert_snapshot(
     call_volume: int,
     put_volume: int,
     source: str = "dashboard",
+    scope: str = "ALL",
 ) -> bool:
     """
     Insert one snapshot row. `snapshot_at_utc` is a naive-UTC datetime (same
-    convention as ChainData.as_of). Returns True if a row was inserted,
-    False if (symbol, snapshot_at) already existed.
+    convention as ChainData.as_of). `scope` is which expirations the volume
+    totals cover: "ALL", "0DTE", "1DTE" or "FRI". Returns True if a row was
+    inserted, False if (symbol, scope, snapshot_at) already existed.
     """
     ts = snapshot_at_utc.replace(microsecond=0, tzinfo=dt.timezone.utc)
     trade_date = ts.astimezone(EASTERN).date()
@@ -67,33 +69,34 @@ def insert_snapshot(
 
     sql = f"""
         INSERT INTO {TABLE_NAME}
-            (symbol, snapshot_at, trade_date, spot, call_volume, put_volume,
+            (symbol, scope, snapshot_at, trade_date, spot, call_volume, put_volume,
              put_call_ratio, source)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (symbol, snapshot_at) DO NOTHING
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (symbol, scope, snapshot_at) DO NOTHING
     """
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             sql,
-            (symbol.upper(), ts, trade_date, spot, int(call_volume), int(put_volume), pcr, source),
+            (symbol.upper(), scope, ts, trade_date, spot, int(call_volume), int(put_volume), pcr, source),
         )
         return cur.rowcount == 1
 
 
-def load_snapshots(symbol: str, trade_date: dt.date) -> pd.DataFrame:
+def load_snapshots(symbol: str, trade_date: dt.date, scope: str = "ALL") -> pd.DataFrame:
     """
     Read datetime, spot, calls volume and puts volume for `symbol` on the
-    given Eastern-time market date. `downloaded_at` is returned as a naive
+    given Eastern-time market date and expiration `scope` ("ALL", "0DTE",
+    "1DTE", "FRI"). `downloaded_at` is returned as a naive
     Eastern datetime, sorted ascending.
     """
     sql = f"""
         SELECT snapshot_at, spot, call_volume, put_volume, put_call_ratio, source
         FROM {TABLE_NAME}
-        WHERE symbol = %s AND trade_date = %s
+        WHERE symbol = %s AND scope = %s AND trade_date = %s
         ORDER BY snapshot_at
     """
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, (symbol.upper(), trade_date))
+        cur.execute(sql, (symbol.upper(), scope, trade_date))
         rows = cur.fetchall()
         cols = [c.name for c in cur.description]
 

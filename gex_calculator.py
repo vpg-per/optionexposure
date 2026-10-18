@@ -132,7 +132,7 @@ class GexResult:
     spot: float
     as_of: dt.datetime
     expirations_used: list
-    by_strike: pd.DataFrame          # strike, call_gex, put_gex, net_gex
+    by_strike: pd.DataFrame          # strike, call_gex, put_gex, net_gex, call_oi, put_oi, call_volume, put_volume
     total_gex: float
     gamma_flip: float | None
     call_wall: float | None
@@ -242,6 +242,7 @@ def cboe_json_to_dataframe(payload: dict) -> tuple[pd.DataFrame, float]:
                 "expiry": parsed["expiry"],
                 "type": parsed["type"],
                 "open_interest": opt.get("open_interest", 0) or 0,
+                "volume": opt.get("volume", 0) or 0,
                 "iv": opt.get("iv", 0) or 0,
                 "gamma": opt.get("gamma", 0) or 0,
                 "bid": opt.get("bid", 0) or 0,
@@ -380,6 +381,46 @@ def label_expirations(expirations: list[dt.datetime], as_of: dt.datetime) -> dic
     return labels
 
 
+# Volume-history scopes: (scope code, display label). The code is stored in
+# the `scope` column of options_volume_history.
+VOLUME_SCOPES = [
+    ("ALL", "All dates"),
+    ("0DTE", "0DTE"),
+    ("1DTE", "1DTE"),
+    ("FRI", "This Friday"),
+]
+
+
+def volume_by_scope(chain: "ChainData") -> dict:
+    """
+    Returns {scope_code: (call_volume, put_volume)} for 0DTE, 1DTE, nearest
+    Friday (even if that Friday is also 0DTE/1DTE) and all dates. A scope is
+    omitted when the chain has no matching expiration (e.g. 0DTE on a weekend).
+    """
+    raw = chain.raw
+    today = utc_naive_to_eastern_naive(chain.as_of).date()   # market date, Eastern
+    exp_dates = raw["expiry"].dt.date
+
+    fridays = sorted(d for d in exp_dates.unique() if d.weekday() == 4 and d >= today)
+    masks = {
+        "0DTE": exp_dates == today,
+        "1DTE": exp_dates == today + dt.timedelta(days=1),
+    }
+    if fridays:
+        masks["FRI"] = exp_dates == fridays[0]
+
+    out = {"ALL": (int(chain.call_volume), int(chain.put_volume))}
+    for code, mask in masks.items():
+        if not mask.any():
+            continue
+        sub = raw[mask]
+        out[code] = (
+            int(sub.loc[sub["type"] == "call", "volume"].sum()),
+            int(sub.loc[sub["type"] == "put", "volume"].sum()),
+        )
+    return out
+
+
 def default_expiration_selection(expirations: list[dt.datetime], as_of: dt.datetime) -> list[dt.datetime]:
     """0DTE only if present; otherwise just the nearest expiration."""
     labels = label_expirations(expirations, as_of)
@@ -411,6 +452,24 @@ def compute_gex(
     )
     by_strike["net_gex"] = by_strike["call_gex"] + by_strike["put_gex"]
     by_strike = by_strike.sort_values("strike").reset_index(drop=True)
+
+    # Per-strike open interest and volume (for the dashboard's OI / Volume
+    # bar-chart modes). OI uses the same OI-filtered contracts as GEX; volume
+    # uses every contract in the selected expirations so low-OI strikes that
+    # trade heavily today (typical for 0DTE) aren't zeroed out.
+    def _by_type(frame: pd.DataFrame, col: str) -> pd.DataFrame:
+        return (
+            frame.pivot_table(index="strike", columns="type", values=col, aggfunc="sum", fill_value=0)
+            .reindex(columns=["call", "put"], fill_value=0)
+        )
+
+    oi_tbl = _by_type(raw, "open_interest")
+    vol_tbl = _by_type(chain.raw[chain.raw["expiry"].isin(selected_expirations)], "volume")
+    for col, tbl, side in (
+        ("call_oi", oi_tbl, "call"), ("put_oi", oi_tbl, "put"),
+        ("call_volume", vol_tbl, "call"), ("put_volume", vol_tbl, "put"),
+    ):
+        by_strike[col] = by_strike["strike"].map(tbl[side]).fillna(0).astype(int)
 
     total_gex = float(by_strike["net_gex"].sum())
     gamma_flip = _find_zero_crossing(by_strike["strike"].values, by_strike["net_gex"].values)

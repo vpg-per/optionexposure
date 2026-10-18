@@ -26,8 +26,10 @@ import streamlit as st
 from db import insert_snapshot, load_snapshots
 from gex_calculator import (
     CBOE_INDEX_SYMBOLS,
+    VOLUME_SCOPES,
     fetch_chain,
     utc_naive_to_eastern_naive,
+    volume_by_scope,
 )
 
 st.set_page_config(page_title="Volume", layout="wide")
@@ -69,7 +71,17 @@ if PRESETS[preset_label] is None:
 else:
     ticker, is_index = PRESETS[preset_label]
 
-st.subheader(f"{ticker} -- Spot price & options volume over time")
+scope_labels = dict(VOLUME_SCOPES)
+scope = st.radio(
+    "Expirations to count",
+    options=[code for code, _ in VOLUME_SCOPES],
+    format_func=lambda c: scope_labels[c],
+    index=1,   # default to 0DTE (second option)
+    horizontal=True,
+)
+scope_label = scope_labels[scope]
+
+st.subheader(f"{ticker} ({scope_label}) -- Spot price & options volume over time")
 
 # --------------------------------------------------------------------------
 # 1) Optionally pull + store a fresh live snapshot
@@ -79,14 +91,18 @@ if fetch_live:
     with st.spinner(f"Fetching latest chain for {ticker}..."):
         try:
             chain = fetch_chain(ticker=ticker, is_index=is_index, save_json=False)
-            insert_snapshot(
-                symbol=chain.ticker,
-                snapshot_at_utc=chain.as_of,
-                spot=chain.spot,
-                call_volume=chain.call_volume,
-                put_volume=chain.put_volume,
-                source="volume_history",
-            )
+            # One row per scope (All / 0DTE / 1DTE / This Friday) so that
+            # history builds up for every view, not just the selected one.
+            for code, (c_vol, p_vol) in volume_by_scope(chain).items():
+                insert_snapshot(
+                    symbol=chain.ticker,
+                    scope=code,
+                    snapshot_at_utc=chain.as_of,
+                    spot=chain.spot,
+                    call_volume=c_vol,
+                    put_volume=p_vol,
+                    source="volume_history",
+                )
         except Exception as e:  # noqa: BLE001
             st.error(f"Could not fetch/store live data: {e}")
 
@@ -94,20 +110,20 @@ if fetch_live:
 # 2) Read from the database
 # --------------------------------------------------------------------------
 try:
-    df = load_snapshots(ticker, view_date)
+    df = load_snapshots(ticker, view_date, scope)
 except Exception as e:  # noqa: BLE001
     st.error(f"Could not read from database: {e}")
     st.stop()
 
 if df.empty:
     st.info(
-        f"No snapshots in the database for {ticker} on {view_date}. Load the main "
-        "dashboard page for this symbol (or tick **Also fetch a live snapshot**) "
-        "to start building history."
+        f"No {scope_label} snapshots in the database for {ticker} on {view_date}. "
+        "Tick **Retrieve data** to store a snapshot now (0DTE / 1DTE / This Friday "
+        "history only exists from when this feature was added)."
     )
     st.stop()
 
-st.caption(f"{len(df)} snapshot(s) for {ticker} on {view_date} (read from Neon database).")
+st.caption(f"{len(df)} {scope_label} snapshot(s) for {ticker} on {view_date} (read from Neon database).")
 
 # --------------------------------------------------------------------------
 # 3) Chart
@@ -115,16 +131,16 @@ st.caption(f"{len(df)} snapshot(s) for {ticker} on {view_date} (read from Neon d
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["spot"], name=f"{ticker} spot",
                          mode="lines+markers", line=dict(color="#2E86FF", width=2), yaxis="y1"))
-fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["call_volume"], name="Call volume",
+fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["call_volume"], name=f"Call volume ({scope_label})",
                          mode="lines+markers", line=dict(color="#2ECC71", width=2), yaxis="y2"))
-fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["put_volume"], name="Put volume",
+fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["put_volume"], name=f"Put volume ({scope_label})",
                          mode="lines+markers", line=dict(color="#E74C3C", width=2), yaxis="y2"))
 
 fig.update_layout(
     template="plotly_dark",
     xaxis=dict(title="Snapshot time (Eastern time)",     tickformat="%H:%M",    hoverformat="%H:%M",),
     yaxis=dict(title=f"{ticker} spot price", side="left"),
-    yaxis2=dict(title="Total options volume", side="right", overlaying="y", showgrid=False),
+    yaxis2=dict(title=f"Options volume ({scope_label})", side="right", overlaying="y", showgrid=False),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     height=560,
     margin=dict(t=60, b=40, l=60, r=60),
@@ -135,7 +151,7 @@ st.plotly_chart(fig, use_container_width=True)
 # --------------------------------------------------------------------------
 # PNG download helper (matplotlib backend -- no browser / kaleido needed)
 # --------------------------------------------------------------------------
-def render_png_matplotlib(df_plot: pd.DataFrame, ticker_label: str, dpi: int = 150) -> bytes:
+def render_png_matplotlib(df_plot: pd.DataFrame, ticker_label: str, scope_text: str = "All dates", dpi: int = 150) -> bytes:
     matplotlib.use("Agg")
     fig_mpl, ax_price = plt.subplots(figsize=(10, 6), dpi=dpi)
     ax_vol = ax_price.twinx()
@@ -143,13 +159,13 @@ def render_png_matplotlib(df_plot: pd.DataFrame, ticker_label: str, dpi: int = 1
     x = df_plot["downloaded_at"]
 
     ax_price.plot(x, df_plot["spot"], color="#2E86FF", linewidth=2, marker="o", label=f"{ticker_label} spot")
-    ax_vol.plot(x, df_plot["call_volume"], color="#2ECC71", linewidth=2, marker="o", label="Call volume")
-    ax_vol.plot(x, df_plot["put_volume"], color="#E74C3C", linewidth=2, marker="o", label="Put volume")
+    ax_vol.plot(x, df_plot["call_volume"], color="#2ECC71", linewidth=2, marker="o", label=f"Call volume ({scope_text})")
+    ax_vol.plot(x, df_plot["put_volume"], color="#E74C3C", linewidth=2, marker="o", label=f"Put volume ({scope_text})")
 
     ax_price.set_xlabel("Snapshot time (Eastern time)")
     ax_price.set_ylabel(f"{ticker_label} spot price", color="#2E86FF")
-    ax_vol.set_ylabel("Total options volume")
-    ax_price.set_title(f"{ticker_label} -- spot price & options volume over time")
+    ax_vol.set_ylabel(f"Options volume ({scope_text})")
+    ax_price.set_title(f"{ticker_label} ({scope_text}) -- spot price & options volume over time")
 
     ax_price.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     fig_mpl.autofmt_xdate()
@@ -167,11 +183,11 @@ def render_png_matplotlib(df_plot: pd.DataFrame, ticker_label: str, dpi: int = 1
 
 
 st.divider()
-png_bytes = render_png_matplotlib(df, ticker)
+png_bytes = render_png_matplotlib(df, ticker, scope_label)
 st.download_button(
     label="📥 Download chart (PNG)",
     data=png_bytes,
-    file_name=f"{ticker}_VolumeHistory_{view_date.strftime('%Y%m%d')}_{eastern_now.strftime('%H%M')}.png",
+    file_name=f"{ticker}_{scope}_VolumeHistory_{view_date.strftime('%Y%m%d')}_{eastern_now.strftime('%H%M')}.png",
     mime="image/png",
     use_container_width=True,
 )

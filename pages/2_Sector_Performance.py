@@ -15,7 +15,7 @@ import streamlit.components.v1 as components
 
 from service.sectorperformance import generate_sector_chart
 
-st.set_page_config(page_title="Sector Performance", layout="wide")
+st.set_page_config(page_title="Sector", layout="wide")
 
 st.title("Sector performance")
 
@@ -28,6 +28,7 @@ _CHART_LOCK = threading.Lock()
 # the HTML: 4+ leading spaces would make st.markdown treat it as a code block.)
 REFERENCE_TABLES_HTML = """
 <style>
+.sector-tables { position: relative; clear: both; margin-top: 16px; }
 .sector-tables .tables-row { display: flex; gap: 40px; flex-wrap: wrap; }
 .sector-tables table { border-collapse: collapse; }
 .sector-tables th, .sector-tables td { border: 1px solid #ddd; padding: 8px; text-align: left; }
@@ -73,11 +74,22 @@ const MAX_SCALE = 6, DOUBLE_TAP_MS = 300;
 let s = 1, x = 0, y = 0, last = null, lastTap = 0;
 
 function fitHeight() {
-  // size the box (and, if allowed, the iframe) to the image's aspect ratio
+  // size the box and the host iframe (and its Streamlit wrapper) to the
+  // image's aspect ratio so the content below never overlaps the chart
   if (!img.naturalWidth) return;
-  const h = Math.round(box.clientWidth * img.naturalHeight / img.naturalWidth);
+  const w = box.clientWidth;
+  if (!w) return;
+  const h = Math.round(w * img.naturalHeight / img.naturalWidth);
   box.style.height = h + 'px';
-  try { window.frameElement.style.height = (h + 4) + 'px'; } catch (e) {}
+  try {
+    const f = window.frameElement;
+    f.style.height = (h + 4) + 'px';
+    f.setAttribute('height', h + 4);
+    // the wrapper Streamlit puts around the iframe can keep the old height
+    // (e.g. after the sidebar is collapsed and the chart gets wider)
+    const wrap = f.parentElement;
+    if (wrap) { wrap.style.height = (h + 4) + 'px'; wrap.style.minHeight = (h + 4) + 'px'; }
+  } catch (e) {}
   apply();
 }
 
@@ -133,6 +145,9 @@ box.addEventListener('touchend', e => {
 
 img.addEventListener('load', fitHeight);
 window.addEventListener('resize', fitHeight);
+// Sidebar show/hide animates the layout; window 'resize' can fire before the
+// final width settles, so also watch the box itself.
+if (window.ResizeObserver) new ResizeObserver(fitHeight).observe(box);
 if (img.complete) fitHeight();
 </script>
 """

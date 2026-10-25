@@ -194,11 +194,11 @@ st.download_button(
 recent_text = (
     f"{ticker} ({scope_label}) -- last 5 snapshots on {view_date} (Eastern time)\n\n"
     + df.tail(5)[["downloaded_at", "spot", "call_volume", "put_volume", "put_call_ratio", "source"]]
-    .to_string(index=False, float_format=lambda v: f"{v:,.2f}")
+    .to_string(index=False, float_format=lambda v: f"{v:,.4f}")
     + "\n"
 )
 st.download_button(
-    label="Download last 5 recent rows",
+    label="Download last 5 rows",
     data=recent_text,
     file_name=f"{ticker}_{scope}_last5_{view_date.strftime('%Y%m%d')}_{eastern_now.strftime('%H%M')}.txt",
     mime="text/plain",

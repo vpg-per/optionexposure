@@ -54,9 +54,7 @@ ctl_symbol, ctl_date, ctl_live, ctl_refresh = st.columns(
 )
 
 preset_label = ctl_symbol.selectbox("Symbol", list(PRESETS.keys()), index=0)
-DEBUG_DEFAULT_DATE = dt.date(2026, 10, 23)
-view_date = ctl_date.date_input("Market date (Eastern)", value=DEBUG_DEFAULT_DATE)
-#view_date = ctl_date.date_input("Market date (Eastern)", value=today_eastern)
+view_date = ctl_date.date_input("Market date (Eastern)", value=today_eastern)
 fetch_live = ctl_live.checkbox("Retrieve data", value=True)
 ctl_refresh.button("Refresh", type="primary", use_container_width=True)  # any click reruns the script
 

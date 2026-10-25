@@ -54,7 +54,9 @@ ctl_symbol, ctl_date, ctl_live, ctl_refresh = st.columns(
 )
 
 preset_label = ctl_symbol.selectbox("Symbol", list(PRESETS.keys()), index=0)
-view_date = ctl_date.date_input("Market date (Eastern)", value=today_eastern)
+DEBUG_DEFAULT_DATE = dt.date(2026, 10, 23)
+view_date = ctl_date.date_input("Market date (Eastern)", value=DEBUG_DEFAULT_DATE)
+#view_date = ctl_date.date_input("Market date (Eastern)", value=today_eastern)
 fetch_live = ctl_live.checkbox("Retrieve data", value=True)
 ctl_refresh.button("Refresh", type="primary", use_container_width=True)  # any click reruns the script
 
@@ -127,12 +129,56 @@ st.caption(f"{len(df)} {scope_label} snapshot(s) for {ticker} on {view_date} (re
 # --------------------------------------------------------------------------
 # 3) Chart
 # --------------------------------------------------------------------------
+GREEN, RED = "#2ECC71", "#E74C3C"
+
+
+def pcr_change_info(df_plot: pd.DataFrame) -> dict:
+    """
+    Change in put-call ratio between the last two snapshots that have a ratio
+    (same rule gexProcessor uses). Single source of truth for the chart
+    annotation and the PNG metadata.
+
+    Annotation convention (arrow shows the market read, sign shows the PCR move):
+        PCR fell  -> green "▲ -0.0215"   state "decreased"
+        PCR rose  -> red   "▼ +0.0200"   state "increased"
+        unchanged -> no annotation        state "neutral"
+    """
+    valid = df_plot.dropna(subset=["put_call_ratio"])
+    info = {"state": "unavailable", "diff": None, "label": None, "color": None, "x": None, "y": None}
+    if valid.empty:
+        return info
+    info["x"] = valid["downloaded_at"].iloc[-1]
+    info["y"] = float(valid["put_call_ratio"].iloc[-1])
+    if len(valid) < 2:
+        return info
+
+    diff = round(float(valid["put_call_ratio"].iloc[-1] - valid["put_call_ratio"].iloc[-2]), 4)
+    print(f"diff: {diff}, {valid["put_call_ratio"].iloc[-1]}, {valid["put_call_ratio"].iloc[-2] }")
+    info["diff"] = diff
+    if diff > 0:
+        info.update(state="increased", label=f"▼ {diff:+.4f}", color=RED)
+    elif diff < 0:
+        info.update(state="decreased", label=f"▲ {diff:+.4f}", color=GREEN)
+    else:
+        info.update(state="neutral")
+    return info
+
+
+pcr_info = pcr_change_info(df)
+
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["spot"], name=f"{ticker} spot",
                          mode="lines+markers", line=dict(color="#2E86FF", width=2), yaxis="y1"))
 fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["put_call_ratio"], name=f"Put-call ratio ({scope_label})",
                          mode="lines+markers", line=dict(color="#F39C12", width=2), yaxis="y2",
                          connectgaps=True, hovertemplate="%{y:.2f}"))
+
+if pcr_info["label"]:
+    fig.add_annotation(
+        x=pcr_info["x"], y=pcr_info["y"], xref="x", yref="y2",
+        text=pcr_info["label"], font=dict(color=pcr_info["color"], size=15),
+        showarrow=True, arrowhead=0, arrowcolor=pcr_info["color"], ax=0, ay=-35,
+    )
 
 fig.update_layout(
     template="plotly_dark",
@@ -165,6 +211,14 @@ def render_png_matplotlib(df_plot: pd.DataFrame, ticker_label: str, scope_text: 
     ax_vol.set_ylabel(f"Put-call ratio ({scope_text})")
     ax_price.set_title(f"{ticker_label} ({scope_text}) -- spot price & put-call ratio over time")
 
+    info = pcr_change_info(df_plot)
+    if info["label"]:
+        ax_vol.annotate(
+            info["label"], xy=(info["x"], info["y"]), xytext=(0, 20), textcoords="offset points",
+            ha="center", color=info["color"], fontsize=12, fontweight="bold",
+            arrowprops=dict(arrowstyle="-", color=info["color"]),
+        )
+
     ax_price.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     fig_mpl.autofmt_xdate()
 
@@ -174,7 +228,12 @@ def render_png_matplotlib(df_plot: pd.DataFrame, ticker_label: str, scope_text: 
 
     buf = BytesIO()
     fig_mpl.tight_layout()
-    fig_mpl.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    # Machine-readable result embedded as PNG text chunks (read by gexProcessor).
+    png_meta = {
+        "PCR_STATE": info["state"],
+        "PCR_DIFF": "NA" if info["diff"] is None else f"{info['diff']:+.4f}",
+    }
+    fig_mpl.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", metadata=png_meta)
     plt.close(fig_mpl)
     buf.seek(0)
     return buf.getvalue()

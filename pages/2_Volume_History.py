@@ -6,9 +6,8 @@ volume snapshots for the chosen symbol from the Neon database table
 (written by the main dashboard page each time it loads/refreshes a chain)
 and plots:
 
-    - Spot price        (blue line,  left y-axis)
-    - Total call volume (green line, right y-axis)
-    - Total put volume  (red line,   right y-axis)
+    - Spot price      (blue line,   left y-axis)
+    - Put-call ratio  (orange line, right y-axis)  = put volume / call volume
 
 X-axis = snapshot time (Eastern). Defaults to today's market date (Eastern).
 """
@@ -81,7 +80,7 @@ scope = st.radio(
 )
 scope_label = scope_labels[scope]
 
-st.subheader(f"{ticker} ({scope_label}) -- Spot price & options volume over time")
+st.subheader(f"{ticker} ({scope_label}) -- Spot price & put-call ratio over time")
 
 # --------------------------------------------------------------------------
 # 1) Optionally pull + store a fresh live snapshot
@@ -131,16 +130,15 @@ st.caption(f"{len(df)} {scope_label} snapshot(s) for {ticker} on {view_date} (re
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["spot"], name=f"{ticker} spot",
                          mode="lines+markers", line=dict(color="#2E86FF", width=2), yaxis="y1"))
-fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["call_volume"], name=f"Call volume ({scope_label})",
-                         mode="lines+markers", line=dict(color="#2ECC71", width=2), yaxis="y2"))
-fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["put_volume"], name=f"Put volume ({scope_label})",
-                         mode="lines+markers", line=dict(color="#E74C3C", width=2), yaxis="y2"))
+fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["put_call_ratio"], name=f"Put-call ratio ({scope_label})",
+                         mode="lines+markers", line=dict(color="#F39C12", width=2), yaxis="y2",
+                         connectgaps=True, hovertemplate="%{y:.2f}"))
 
 fig.update_layout(
     template="plotly_dark",
     xaxis=dict(title="Snapshot time (Eastern time)",     tickformat="%H:%M",    hoverformat="%H:%M",),
     yaxis=dict(title=f"{ticker} spot price", side="left"),
-    yaxis2=dict(title=f"Options volume ({scope_label})", side="right", overlaying="y", showgrid=False),
+    yaxis2=dict(title=f"Put-call ratio ({scope_label})", side="right", tickformat=".2f", overlaying="y", showgrid=False),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     height=560,
     margin=dict(t=60, b=40, l=60, r=60),
@@ -159,13 +157,13 @@ def render_png_matplotlib(df_plot: pd.DataFrame, ticker_label: str, scope_text: 
     x = df_plot["downloaded_at"]
 
     ax_price.plot(x, df_plot["spot"], color="#2E86FF", linewidth=2, marker="o", label=f"{ticker_label} spot")
-    ax_vol.plot(x, df_plot["call_volume"], color="#2ECC71", linewidth=2, marker="o", label=f"Call volume ({scope_text})")
-    ax_vol.plot(x, df_plot["put_volume"], color="#E74C3C", linewidth=2, marker="o", label=f"Put volume ({scope_text})")
+    pcr = df_plot["put_call_ratio"]
+    ax_vol.plot(x[pcr.notna()], pcr.dropna(), color="#F39C12", linewidth=2, marker="o", label=f"Put-call ratio ({scope_text})")
 
     ax_price.set_xlabel("Snapshot time (Eastern time)")
     ax_price.set_ylabel(f"{ticker_label} spot price", color="#2E86FF")
-    ax_vol.set_ylabel(f"Options volume ({scope_text})")
-    ax_price.set_title(f"{ticker_label} ({scope_text}) -- spot price & options volume over time")
+    ax_vol.set_ylabel(f"Put-call ratio ({scope_text})")
+    ax_price.set_title(f"{ticker_label} ({scope_text}) -- spot price & put-call ratio over time")
 
     ax_price.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     fig_mpl.autofmt_xdate()
@@ -187,14 +185,29 @@ png_bytes = render_png_matplotlib(df, ticker, scope_label)
 st.download_button(
     label="📥 Download chart (PNG)",
     data=png_bytes,
-    file_name=f"{ticker}_{scope}_VolumeHistory_{view_date.strftime('%Y%m%d')}_{eastern_now.strftime('%H%M')}.png",
+    file_name=f"{ticker}_{scope}_PCRHistory_{view_date.strftime('%Y%m%d')}_{eastern_now.strftime('%H%M')}.png",
     mime="image/png",
     use_container_width=True,
 )
 
+# Last 5 most recent rows as a plain-text table
+recent_text = (
+    f"{ticker} ({scope_label}) -- last 5 snapshots on {view_date} (Eastern time)\n\n"
+    + df.tail(5)[["downloaded_at", "spot", "call_volume", "put_volume", "put_call_ratio", "source"]]
+    .to_string(index=False, float_format=lambda v: f"{v:,.2f}")
+    + "\n"
+)
+st.download_button(
+    label="Download last 5 recent rows",
+    data=recent_text,
+    file_name=f"{ticker}_{scope}_last5_{view_date.strftime('%Y%m%d')}_{eastern_now.strftime('%H%M')}.txt",
+    mime="text/plain",
+    use_container_width=True,
+)
+
 st.caption(
-    f"Showing snapshots from {view_date} (Eastern time). Volume totals are summed "
-    "across every strike and expiration in the chain at each snapshot time."
+    f"Showing snapshots from {view_date} (Eastern time). Put-call ratio = total put "
+    "volume / total call volume, summed across the selected expirations at each snapshot time."
 )
 
 with st.expander("Raw snapshot data"):

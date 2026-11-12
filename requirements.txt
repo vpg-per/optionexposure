@@ -8,3 +8,5 @@ plotly>=5.20
 Matplotlib
 pytz
 psycopg2-binary>=2.9.11
+alpaca-py
+python-dotenv

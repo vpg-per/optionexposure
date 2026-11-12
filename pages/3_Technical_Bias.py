@@ -3,15 +3,19 @@ pages/3_Technical_Bias.py
 
 MACD / RSI bias for a list of symbols across 5m, 15m, 30m, 1h and 4h.
 Bars come from service.alaDataManager (5-min bars, closed bars only); the
-larger timeframes are resampled from them (4h bars start at 01/05/09/13/17/21 ET). Calculation rules live in
-service/biasCalculator.py (ported from dataAnalyzer.py).
+larger timeframes are resampled from them (4h bars start at 01/05/09/13/17/21 ET).
+Calculation rules live in service/biasCalculator.py (ported from dataAnalyzer.py).
+
+Debug mode: tick "Debug: as-of time" to see the bias exactly as it would have
+looked at a past Eastern date/time (only bars closed by then are used).
 """
+import datetime as dt
 import re
 
 import pandas as pd
 import streamlit as st
 
-from service.alaDataManager import fetch_stock_data, resample_bars
+from service.alaDataManager import EASTERN, fetch_stock_data, resample_bars
 from service.biasCalculator import (
     MIN_BARS,
     compute_bias,
@@ -46,6 +50,24 @@ raw_symbols = ctl_symbols.text_input("Symbols (comma-separated)", value="SPY, GL
 if ctl_refresh.button("Refresh", type="primary", use_container_width=True):
     st.session_state.bias_refresh_key += 1
 
+now_et = dt.datetime.now(EASTERN)
+ctl_debug, ctl_date, ctl_time = st.columns([2, 2, 2], vertical_alignment="bottom")
+debug_on = ctl_debug.checkbox("Debug: (ET)", value=False,
+                              help="Show the bias as it was at a past time instead of the latest candle.")
+asof_date = ctl_date.date_input("As-of date", value=now_et.date(), max_value=now_et.date(),
+                                key="bias_asof_date", disabled=not debug_on)
+asof_time = ctl_time.time_input(
+    "As-of time (ET)", value=now_et.time().replace(minute=now_et.minute // 5 * 5, second=0, microsecond=0),
+    step=300, key="bias_asof_time", disabled=not debug_on)
+
+asof_et = None  # None = live (latest closed candle)
+if debug_on:
+    asof_et = pd.Timestamp(dt.datetime.combine(asof_date, asof_time)).tz_localize(
+        EASTERN, ambiguous=True, nonexistent="shift_forward")
+    if asof_et >= pd.Timestamp(now_et):
+        st.warning("As-of time is in the future; showing the latest closed candle instead.")
+        asof_et = None
+
 symbols = list(dict.fromkeys(s for s in re.split(r"[,\s]+", raw_symbols.upper()) if s))
 if len(symbols) > MAX_SYMBOLS:
     st.warning(f"Showing the first {MAX_SYMBOLS} symbols only.")
@@ -59,11 +81,18 @@ if not symbols:
 # Data
 # --------------------------------------------------------------------------
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def load_symbol_bias(symbol: str, refresh_key: int) -> tuple[list[dict], list[str]]:
+def load_symbol_bias(symbol: str, refresh_key: int, asof_iso: str | None,
+                     lookback_days: int) -> tuple[list[dict], list[str]]:
     """One 5-min fetch per symbol; every other timeframe is resampled from it.
     refresh_key only exists so the Refresh button yields a new cache entry.
+    asof_iso (debug): ISO timestamp with offset; only 5-min bars that had closed
+    by then are kept, so the result is the bias as it stood at that moment.
     Returns (rows, skipped-timeframe messages)."""
-    base = fetch_stock_data(symbol, "5min", lookback_days=LOOKBACK_DAYS)
+    base = fetch_stock_data(symbol, "5min", lookback_days=lookback_days)
+    if asof_iso:
+        base = base[base.index + pd.Timedelta("5min") <= pd.Timestamp(asof_iso)]
+        if base.empty:
+            raise ValueError(f"no bars closed before {asof_iso} in the fetched history")
     base_last_end = base.index[-1] + pd.Timedelta("5min")
 
     rows, notes = [], []
@@ -84,11 +113,17 @@ def load_symbol_bias(symbol: str, refresh_key: int) -> tuple[list[dict], list[st
     return rows, notes
 
 
+# History must reach back LOOKBACK_DAYS before the as-of time, not just before today.
+extra_days = (now_et.date() - asof_et.date()).days + 1 if asof_et is not None else 0
+lookback_days = LOOKBACK_DAYS + extra_days
+asof_iso = asof_et.isoformat() if asof_et is not None else None
+
 all_rows, notes, errors = [], [], []
 with st.spinner("Fetching bars and calculating bias..."):
     for sym in symbols:
         try:
-            rows, skipped = load_symbol_bias(sym, st.session_state.bias_refresh_key)
+            rows, skipped = load_symbol_bias(sym, st.session_state.bias_refresh_key,
+                                             asof_iso, lookback_days)
             all_rows.extend(rows)
             notes.extend(skipped)
         except Exception as e:  # noqa: BLE001
@@ -113,10 +148,11 @@ def _color(v):
 
 
 def _fmt_time(ts) -> str:
-    """Bar start time as HH:MM (prefixed with the date when it isn't today, ET)."""
+    """Bar start time as HH:MM (prefixed with the date when it isn't the reference
+    day: today, or the as-of day in debug mode)."""
     ts = pd.Timestamp(ts)
-    today = pd.Timestamp.now(tz=ts.tz).date()
-    return ts.strftime("%H:%M") if ts.date() == today else ts.strftime("%m-%d %H:%M")
+    ref_day = asof_et.date() if asof_et is not None else pd.Timestamp.now(tz=ts.tz).date()
+    return ts.strftime("%H:%M") if ts.date() == ref_day else ts.strftime("%m-%d %H:%M")
 
 
 def _elementwise(frame: pd.DataFrame, fn) -> pd.DataFrame:

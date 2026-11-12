@@ -151,7 +151,7 @@ def pcr_change_info(df_plot: pd.DataFrame) -> dict:
         return info
 
     diff = round(float(valid["put_call_ratio"].iloc[-1] - valid["put_call_ratio"].iloc[-2]), 4)
-    print(f"diff: {diff}, {valid["put_call_ratio"].iloc[-1]}, {valid["put_call_ratio"].iloc[-2] }")
+    print(f"diff: {diff}, {valid['put_call_ratio'].iloc[-1]}, {valid['put_call_ratio'].iloc[-2]}")
     info["diff"] = diff
     if diff > 0:
         info.update(state="increased", label=f"▼ {diff:+.4f}", color=RED)

@@ -124,8 +124,10 @@ def download_stock_data(
     startPeriod,
     endPeriod,
     interval: str = "5m",
+    with_volume: bool = False,
 ) -> pd.DataFrame | None:
     """Fetch OHLC bars from Yahoo Finance's chart API.
+    with_volume=True also returns a `volume` column (missing values -> 0).
 
     startPeriod/endPeriod may be datetimes/Timestamps or raw unix seconds.
     Returns a DataFrame (open/high/low/close) indexed by tz-aware US/Eastern
@@ -167,10 +169,15 @@ def download_stock_data(
 
         result = chart["result"][0]
         quotes = result["indicators"]["quote"][0]
+        data = {c: np.asarray(quotes[c], dtype="float64") for c in ("open", "high", "low", "close")}
+        if with_volume and quotes.get("volume") is not None:
+            data["volume"] = np.asarray(quotes["volume"], dtype="float64")
         df = pd.DataFrame(
-            {c: np.asarray(quotes[c], dtype="float64") for c in ("open", "high", "low", "close")},
+            data,
             index=pd.to_datetime(np.asarray(result["timestamp"], dtype="int64"), unit="s", utc=True),
-        ).dropna()
+        ).dropna(subset=["open", "high", "low", "close"])
+        if "volume" in df.columns:
+            df["volume"] = df["volume"].fillna(0.0)
         if df.empty:
             return None
 
@@ -227,7 +234,7 @@ def fetch_recent_yahoo(
     now_et = datetime.now(EASTERN)
     start = pd.Timestamp(now_et - timedelta(minutes=minutes)).floor("5min")
 
-    df = download_stock_data(symbol, start, now_et, interval="1m")
+    df = download_stock_data(symbol, start, now_et, interval="1m", with_volume=True)
     if df is None or df.empty:
         return None
 
@@ -244,6 +251,8 @@ def resample_bars(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     df must have a DatetimeIndex and open/high/low/close columns."""
     ohlc_agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
     agg = {col: fn for col, fn in ohlc_agg.items() if col in df.columns}
+    if "volume" in df.columns:  # volume adds up across the merged bars
+        agg["volume"] = "sum"
 
     resampled = df.resample(rule).agg(agg).dropna(subset=["open"])
     resampled["interval"] = rule
@@ -312,7 +321,8 @@ def fetch_feed(
         return None
 
     df = to_eastern(bars, symbol)
-    return df.drop(columns=["vwap", "volume", "trade_count", "feed"], errors="ignore")
+    # volume and the per-bar vwap are kept: biasCalculator.add_vwap builds the session VWAP from them.
+    return df.drop(columns=["trade_count", "feed"], errors="ignore")
 
 
 def fetch_combined(

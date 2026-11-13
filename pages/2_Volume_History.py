@@ -142,13 +142,16 @@ def pcr_change_info(df_plot: pd.DataFrame) -> dict:
         unchanged -> no annotation        state "neutral"
     """
     valid = df_plot.dropna(subset=["put_call_ratio"])
-    info = {"state": "unavailable", "diff": None, "label": None, "color": None, "x": None, "y": None}
+    info = {"state": "unavailable", "diff": None, "label": None, "color": None, "x": None, "y": None,
+            "prev_x": None, "prev_y": None}
     if valid.empty:
         return info
     info["x"] = valid["downloaded_at"].iloc[-1]
     info["y"] = float(valid["put_call_ratio"].iloc[-1])
     if len(valid) < 2:
         return info
+    info["prev_x"] = valid["downloaded_at"].iloc[-2]
+    info["prev_y"] = float(valid["put_call_ratio"].iloc[-2])
 
     diff = round(float(valid["put_call_ratio"].iloc[-1] - valid["put_call_ratio"].iloc[-2]), 4)
     print(f"diff: {diff}, {valid['put_call_ratio'].iloc[-1]}, {valid['put_call_ratio'].iloc[-2]}")
@@ -163,6 +166,27 @@ def pcr_change_info(df_plot: pd.DataFrame) -> dict:
 
 
 pcr_info = pcr_change_info(df)
+
+# Rate of change of the put-call ratio: latest snapshot vs the one before it
+# (only snapshots that have a ratio count), so it updates as new data is read.
+m_latest, m_change, m_prev = st.columns(3)
+if pcr_info["y"] is not None:
+    m_latest.metric("Put-call ratio (latest)", f"{pcr_info['y']:.4f}",
+                    help=f"Snapshot at {pd.Timestamp(pcr_info['x']):%H:%M} ET")
+if pcr_info["diff"] is None:
+    m_change.metric("Change vs previous snapshot", "n/a")
+    m_change.caption("Needs at least 2 snapshots with a put-call ratio.")
+else:
+    direction = {"increased": "Up", "decreased": "Down", "neutral": "No change"}[pcr_info["state"]]
+    pct = (f" ({pcr_info['diff'] / pcr_info['prev_y']:+.1%})" if pcr_info["prev_y"] else "")
+    # Streamlit colours a positive delta green; "inverse" makes a rising ratio red and a
+    # falling one green, matching the chart annotation. Unchanged = grey.
+    m_change.metric("Change vs previous snapshot", direction,
+                    delta=f"{pcr_info['diff']:+.4f}{pct}",
+                    delta_color="off" if pcr_info["state"] == "neutral" else "inverse",
+                    help=f"{pd.Timestamp(pcr_info['prev_x']):%H:%M} -> {pd.Timestamp(pcr_info['x']):%H:%M} ET")
+    m_prev.metric("Previous put-call ratio", f"{pcr_info['prev_y']:.4f}",
+                  help=f"Snapshot at {pd.Timestamp(pcr_info['prev_x']):%H:%M} ET")
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["spot"], name=f"{ticker} spot",

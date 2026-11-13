@@ -17,10 +17,15 @@ import streamlit as st
 
 from service.alaDataManager import EASTERN, fetch_stock_data, resample_bars
 from service.biasCalculator import (
+    CONE_ATR_MULT,
     MIN_BARS,
+    VWAP_ANCHOR,
+    add_atr,
+    add_vwap,
     compute_bias,
     drop_unfinished_buckets,
     latest_snapshot,
+    project_next_candles,
     resample_anchored,
 )
 
@@ -111,6 +116,8 @@ def load_symbol_bias(symbol: str, refresh_key: int, asof_iso: str | None,
             continue
         bias_frame = compute_bias(frame)
         if rule == "5min":
+            # VWAP/ATR on the full frame so the VWAP cumulation starts at the session open.
+            bias_frame = add_vwap(add_atr(bias_frame))
             frame5m = bias_frame.tail(BARS_KEPT)
         snap = latest_snapshot(bias_frame)
         rows.append({"symbol": symbol, "timeframe": label,
@@ -186,80 +193,42 @@ def show_pivot(title: str, column: str) -> None:
     st.subheader(title)
     st.dataframe(labels.style.apply(lambda _: css, axis=None), use_container_width=True)
 
-
-show_pivot("Overall bias", "overall_bias")
 col_macd, col_rsi = st.columns(2)
 with col_macd:
     show_pivot("MACD trend", "macd_trend")
 with col_rsi:
     show_pivot("RSI trend", "rsi_trend")
 
-
 # --------------------------------------------------------------------------
-# Next 3 candles (5 min) - heuristic projection from the closed 5-min bars
+# Next 3 candles (5 min) - heuristic scenario (logic: biasCalculator.project_next_candles)
 # --------------------------------------------------------------------------
-def project_next_candles(frame5m: pd.DataFrame, n: int = 3) -> pd.DataFrame:
-    """Heuristic OHLC projection for the next n 5-min candles.
-
-    Not a forecast -- a scenario built from the same numbers the bias table shows:
-      * drift: average per-bar net move over the last 5 bars (half-strength for the
-        first projected bar, fading to 0.3x afterwards -- momentum decays);
-      * mean reversion: when RSI is stretched (<35 / >65) AND the MACD histogram is
-        contracting (|hist| shrinking vs 4 bars ago, i.e. post-climax basing), a
-        counter-drift of ~15% of the typical range is added per bar;
-      * range: median 5-min range of the last 12 bars, wick ~45% of it on each side.
-    Returns a DataFrame with open/high/low/close columns.
-    """
-    if frame5m is None or len(frame5m) < 10:
-        return pd.DataFrame()
-    close = frame5m["close"].astype("float64")
-    rng = float((frame5m["high"] - frame5m["low"]).tail(12).median())
-    if not rng or rng != rng:  # degenerate flat data
-        return pd.DataFrame()
-
-    drift = float(close.iloc[-1] - close.iloc[-6]) / 5.0
-    rsi = float(frame5m["rsi"].iloc[-1])
-    hist = frame5m["histogram"].astype("float64")
-    hist_contracting = abs(hist.iloc[-1]) < abs(hist.iloc[-4])
-    oversold, overbought = rsi < 35.0, rsi > 65.0
-
-    px = float(close.iloc[-1])
-    rows = []
-    for i in range(n):
-        step = drift * (0.5 if i == 0 else 0.3)
-        if hist_contracting and oversold:
-            step += rng * 0.15
-        elif hist_contracting and overbought:
-            step -= rng * 0.15
-        o = px
-        c = px + step
-        hi = max(o, c) + rng * 0.45
-        lo = min(o, c) - rng * 0.45
-        rows.append({"open": round(o, 2), "high": round(hi, 2),
-                     "low": round(lo, 2), "close": round(c, 2)})
-        px = c
-    return pd.DataFrame(rows)
-
-
 st.subheader("Next 3 candles (5 min projection)")
-pred_rows = []
+pred_rows, ctx_rows = [], []
 for sym in [s for s in symbols if s in frames5m and not frames5m[s].empty]:
-    proj = project_next_candles(frames5m[sym], n=3)
+    proj, ctx = project_next_candles(frames5m[sym], n=3)
     if proj.empty:
         continue
     last_bar = frames5m[sym].index[-1]
+    ctx_rows.append({"Symbol": sym, "Last close": ctx["price"],
+                     "Session VWAP": ctx["vwap"], "Dist. from VWAP (ATR)": ctx["vwap_dist_atr"],
+                     "ATR(14)": ctx["atr"]})
     for j, row in enumerate(proj.itertuples(index=False), start=1):
         pred_rows.append({"Symbol": sym,
                           "Bar start (ET)": (last_bar + pd.Timedelta(minutes=5 * j)).strftime("%m-%d %H:%M"),
-                          "Open": row.open, "High": row.high,
-                          "Low": row.low, "Close": row.close})
+                          "Open": row.open, "High": row.high, "Low": row.low, "Close": row.close,
+                          "P(close > now)": f"{row.p_up:.0%}", "Lean": row.lean,
+                          "Cone low": row.cone_low, "Cone high": row.cone_high})
 if pred_rows:
     st.dataframe(pd.DataFrame(pred_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(ctx_rows), use_container_width=True, hide_index=True)
 else:
     st.info("Not enough 5-min bars for a projection.")
-st.caption("Heuristic scenario, not a forecast: recent drift with mean-reversion when RSI is "
-           "stretched and the MACD histogram is contracting. Ranges use the median 5-min range. "
-           "In debug (as-of) mode the projection starts from the as-of bar.")
+st.caption(f"Heuristic scenario, not a forecast. Inputs: recent drift and distance from the session VWAP "
+           f"(anchored {VWAP_ANCHOR:%H:%M} ET; a stretched price is pulled back toward it, at full strength "
+           f"when the MACD histogram is contracting). P(close > now) is the modelled "
+           f"chance that bar closes above the last closed price. Cone = projected close +/- "
+           f"{CONE_ATR_MULT:g} x ATR x sqrt(bars ahead). High/Low wicks lean toward the projected direction. "
+           f"In debug (as-of) mode the projection starts from the as-of bar.")
 
 st.caption("Cell text = start time (ET) of the last closed bar. Colour: green = Bullish, "
            "red = Bearish, grey = Neutral. Exact values are in the detail table below.")
@@ -267,10 +236,9 @@ st.caption("Cell text = start time (ET) of the last closed bar. Colour: green = 
 with st.expander("Detail (latest closed bar per timeframe)"):
     view = detail.assign(bar_time=detail["bar_time"].dt.strftime("%m-%d %H:%M"))
     view = view[["symbol", "timeframe", "bar_time", "close", "macd", "macd_signal", "macd_hist",
-                 "macd_trend", "rsi", "rsi_signal", "momentum", "rsi_trend", "overall_bias"]]
+                 "macd_trend"]]
     view.columns = ["Symbol", "Timeframe", "Bar start (ET)", "Close", "MACD", "MACD signal",
-                    "MACD hist", "MACD trend", "RSI", "RSI signal", "RSI momentum",
-                    "RSI trend", "Overall bias"]
+                    "MACD hist", "MACD trend"]
     order = {t: i for i, t in enumerate(TF_LABELS)}
     view = view.sort_values(["Symbol", "Timeframe"], key=lambda s: s.map(order) if s.name == "Timeframe" else s)
     st.dataframe(view, use_container_width=True, hide_index=True)
@@ -294,7 +262,9 @@ with st.expander("5-min bars (debug)"):
             print(f"[{dbg_sym} 5m] last {len(bars)} bars (ET):")
             print(bars.to_string())
 
-        view5 = bars.drop(columns=[c for c in ("interval", "symbol") if c in bars.columns]).copy()
+        # RSI (and the columns derived from it) are left out of this table; MACD, ATR and VWAP stay.
+        hide = ("interval", "symbol", "rsi", "rsignal", "momentum", "RSITrend", "OverallBias")
+        view5 = bars.drop(columns=[c for c in hide if c in bars.columns]).copy()
         f32 = view5.select_dtypes("float32").columns
         view5[f32] = view5[f32].astype("float64")  # avoids 65.599998-style display noise
         view5.insert(0, "Bar start (ET)", view5.index.strftime("%m-%d %H:%M"))

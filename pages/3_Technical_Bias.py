@@ -52,7 +52,7 @@ if "bias_refresh_key" not in st.session_state:
     st.session_state.bias_refresh_key = 0
 
 ctl_symbols, ctl_refresh = st.columns([5, 1], vertical_alignment="bottom")
-raw_symbols = ctl_symbols.text_input("Symbols (comma-separated)", value="SPY, GLD, QQQ, IWM")
+raw_symbols = ctl_symbols.text_input("Symbols (comma-separated)", value="SPY, GLD")
 if ctl_refresh.button("Refresh", type="primary", use_container_width=True):
     st.session_state.bias_refresh_key += 1
 
@@ -223,13 +223,6 @@ if pred_rows:
     st.dataframe(pd.DataFrame(ctx_rows), use_container_width=True, hide_index=True)
 else:
     st.info("Not enough 5-min bars for a projection.")
-st.caption(f"Heuristic scenario, not a forecast. Inputs: recent drift and distance from the session VWAP "
-           f"(anchored {VWAP_ANCHOR:%H:%M} ET; a stretched price is pulled back toward it, at full strength "
-           f"when the MACD histogram is contracting). P(close > now) is the modelled "
-           f"chance that bar closes above the last closed price. Cone = projected close +/- "
-           f"{CONE_ATR_MULT:g} x ATR x sqrt(bars ahead). High/Low wicks lean toward the projected direction. "
-           f"In debug (as-of) mode the projection starts from the as-of bar.")
-
 st.caption("Cell text = start time (ET) of the last closed bar. Colour: green = Bullish, "
            "red = Bearish, grey = Neutral. Exact values are in the detail table below.")
 

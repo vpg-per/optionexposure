@@ -137,9 +137,9 @@ def pcr_change_info(df_plot: pd.DataFrame) -> dict:
     annotation and the PNG metadata.
 
     Annotation convention (arrow shows the market read, sign shows the PCR move):
-        PCR fell  -> green "▲ -0.0215"   state "decreased"
-        PCR rose  -> red   "▼ +0.0200"   state "increased"
-        unchanged -> no annotation        state "neutral"
+        PCR fell  -> green "▲ -0.0215"   state "Down"
+        PCR rose  -> red   "▼ +0.0200"   state "Up"
+        unchanged -> no annotation        state "No change"
     """
     valid = df_plot.dropna(subset=["put_call_ratio"])
     info = {"state": "unavailable", "diff": None, "label": None, "color": None, "x": None, "y": None,
@@ -157,11 +157,11 @@ def pcr_change_info(df_plot: pd.DataFrame) -> dict:
     print(f"diff: {diff}, {valid['put_call_ratio'].iloc[-1]}, {valid['put_call_ratio'].iloc[-2]}")
     info["diff"] = diff
     if diff > 0:
-        info.update(state="increased", label=f"▼ {diff:+.4f}", color=RED)
+        info.update(state="Up", label=f"▼ {diff:+.4f}", color=RED)
     elif diff < 0:
-        info.update(state="decreased", label=f"▲ {diff:+.4f}", color=GREEN)
+        info.update(state="Down", label=f"▲ {diff:+.4f}", color=GREEN)
     else:
-        info.update(state="neutral")
+        info.update(state="No change")
     return info
 
 
@@ -177,13 +177,13 @@ if pcr_info["diff"] is None:
     m_change.metric("Change vs previous snapshot", "n/a")
     m_change.caption("Needs at least 2 snapshots with a put-call ratio.")
 else:
-    direction = {"increased": "Up", "decreased": "Down", "neutral": "No change"}[pcr_info["state"]]
+    direction = pcr_info["state"]  # "Up" / "Down" / "No change"
     pct = (f" ({pcr_info['diff'] / pcr_info['prev_y']:+.1%})" if pcr_info["prev_y"] else "")
     # Streamlit colours a positive delta green; "inverse" makes a rising ratio red and a
     # falling one green, matching the chart annotation. Unchanged = grey.
     m_change.metric("Change vs previous snapshot", direction,
                     delta=f"{pcr_info['diff']:+.4f}{pct}",
-                    delta_color="off" if pcr_info["state"] == "neutral" else "inverse",
+                    delta_color="off" if pcr_info["state"] == "No change" else "inverse",
                     help=f"{pd.Timestamp(pcr_info['prev_x']):%H:%M} -> {pd.Timestamp(pcr_info['x']):%H:%M} ET")
     m_prev.metric("Previous put-call ratio", f"{pcr_info['prev_y']:.4f}",
                   help=f"Snapshot at {pd.Timestamp(pcr_info['prev_x']):%H:%M} ET")

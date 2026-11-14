@@ -22,13 +22,18 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from db import insert_snapshot, load_snapshots
+from db import insert_snapshot
 from gex_calculator import (
     CBOE_INDEX_SYMBOLS,
     VOLUME_SCOPES,
     fetch_chain,
     utc_naive_to_eastern_naive,
     volume_by_scope,
+)
+from service.pcrAnalysis import (
+    load_pcr_snapshots,
+    pcr_change_info,
+    pcr_reversal_info,
 )
 
 st.set_page_config(page_title="Volume", layout="wide")
@@ -109,7 +114,7 @@ if fetch_live:
 # 2) Read from the database
 # --------------------------------------------------------------------------
 try:
-    df = load_snapshots(ticker, view_date, scope)
+    df = load_pcr_snapshots(ticker, view_date, scope)
 except Exception as e:  # noqa: BLE001
     st.error(f"Could not read from database: {e}")
     st.stop()
@@ -127,49 +132,12 @@ st.caption(f"{len(df)} {scope_label} snapshot(s) for {ticker} on {view_date} (re
 # --------------------------------------------------------------------------
 # 3) Chart
 # --------------------------------------------------------------------------
-GREEN, RED = "#2ECC71", "#E74C3C"
-
-
-def pcr_change_info(df_plot: pd.DataFrame) -> dict:
-    """
-    Change in put-call ratio between the last two snapshots that have a ratio
-    (same rule gexProcessor uses). Single source of truth for the chart
-    annotation and the PNG metadata.
-
-    Annotation convention (arrow shows the market read, sign shows the PCR move):
-        PCR fell  -> green "▲ -0.0215"   state "Down"
-        PCR rose  -> red   "▼ +0.0200"   state "Up"
-        unchanged -> no annotation        state "No change"
-    """
-    valid = df_plot.dropna(subset=["put_call_ratio"])
-    info = {"state": "unavailable", "diff": None, "label": None, "color": None, "x": None, "y": None,
-            "prev_x": None, "prev_y": None}
-    if valid.empty:
-        return info
-    info["x"] = valid["downloaded_at"].iloc[-1]
-    info["y"] = float(valid["put_call_ratio"].iloc[-1])
-    if len(valid) < 2:
-        return info
-    info["prev_x"] = valid["downloaded_at"].iloc[-2]
-    info["prev_y"] = float(valid["put_call_ratio"].iloc[-2])
-
-    diff = round(float(valid["put_call_ratio"].iloc[-1] - valid["put_call_ratio"].iloc[-2]), 4)
-    print(f"diff: {diff}, {valid['put_call_ratio'].iloc[-1]}, {valid['put_call_ratio'].iloc[-2]}")
-    info["diff"] = diff
-    if diff > 0:
-        info.update(state="Up", label=f"▼ {diff:+.4f}", color=RED)
-    elif diff < 0:
-        info.update(state="Down", label=f"▲ {diff:+.4f}", color=GREEN)
-    else:
-        info.update(state="No change")
-    return info
-
-
 pcr_info = pcr_change_info(df)
+pcr_rev = pcr_reversal_info(df)
 
 # Rate of change of the put-call ratio: latest snapshot vs the one before it
 # (only snapshots that have a ratio count), so it updates as new data is read.
-m_latest, m_change, m_prev = st.columns(3)
+m_latest, m_change, m_prev, m_rev = st.columns(4)
 if pcr_info["y"] is not None:
     m_latest.metric("Put-call ratio (latest)", f"{pcr_info['y']:.4f}",
                     help=f"Snapshot at {pd.Timestamp(pcr_info['x']):%H:%M} ET")
@@ -187,6 +155,14 @@ else:
                     help=f"{pd.Timestamp(pcr_info['prev_x']):%H:%M} -> {pd.Timestamp(pcr_info['x']):%H:%M} ET")
     m_prev.metric("Previous put-call ratio", f"{pcr_info['prev_y']:.4f}",
                   help=f"Snapshot at {pd.Timestamp(pcr_info['prev_x']):%H:%M} ET")
+
+# Reversal: shown only when the latest snapshot itself flipped the direction of the ratio.
+if pcr_rev["on_last"]:
+    m_rev.metric(f"PCR reversal ({pcr_rev['state']})", f"{pcr_rev['value']:.4f}",
+                 help=f"Turning point at {pd.Timestamp(pcr_rev['time']):%H:%M} ET, "
+                      "confirmed by the latest snapshot")
+else:
+    m_rev.metric("PCR reversal", "No change", help="The latest snapshot did not reverse the ratio's direction.")
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["spot"], name=f"{ticker} spot",

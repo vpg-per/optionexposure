@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from service.alaDataManager import EASTERN, fetch_stock_data, resample_bars
+from service.pcrAnalysis import ZERO_DTE_SCOPE, load_pcr_snapshots, pcr_reversal_info
 from service.biasCalculator import (
     CONE_ATR_MULT,
     MIN_BARS,
@@ -263,3 +264,44 @@ with st.expander("5-min bars (debug)"):
         view5.insert(0, "Bar start (ET)", view5.index.strftime("%m-%d %H:%M"))
         st.dataframe(view5.round(2), use_container_width=True, hide_index=True)
         st.caption("Closed 5-min bars, newest last. In debug (as-of) mode the table ends at the as-of time.")
+
+# --------------------------------------------------------------------------
+# PCR reversal (0DTE put-call ratio from the volume-history snapshots)
+# Runs last, after everything above has loaded. Logic: service/pcrAnalysis.py
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def load_pcr_reversal(symbol: str, refresh_key: int, day_iso: str, until_iso: str | None) -> dict:
+    """Reversal info + latest ratio for one symbol. refresh_key only busts the cache."""
+    df = load_pcr_snapshots(symbol, dt.date.fromisoformat(day_iso), ZERO_DTE_SCOPE,
+                            until=pd.Timestamp(until_iso) if until_iso else None)
+    info = pcr_reversal_info(df)
+    valid = df.dropna(subset=["put_call_ratio"]) if not df.empty else df
+    info["latest"] = float(valid["put_call_ratio"].iloc[-1]) if not valid.empty else None
+    return info
+
+
+PCR_SYMBOL = "SPY"   # the PCR reversal panel is shown for this symbol only
+
+if PCR_SYMBOL in symbols:   # panel is omitted entirely when SPY isn't in the input field
+    st.subheader(f"{PCR_SYMBOL} PCR reversal (0DTE put-call ratio)")
+    pcr_day = (asof_et or pd.Timestamp(now_et)).date()
+    try:
+        r = load_pcr_reversal(PCR_SYMBOL, st.session_state.bias_refresh_key, pcr_day.isoformat(), asof_iso)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"{PCR_SYMBOL} PCR: {e}")
+    else:
+        fresh = r["on_last"]   # reversal confirmed by the latest snapshot
+        pcr_df = pd.DataFrame([{"Symbol": PCR_SYMBOL,
+                                "Reversal": r["state"] if fresh else "No change",
+                                "PCR at turn": r["value"] if fresh else None,
+                                "Turn time (ET)": pd.Timestamp(r["time"]).strftime("%H:%M") if fresh else "-",
+                                "Latest PCR": r["latest"]}])
+        pcr_color = {"Up→Down": COLORS["Bullish"], "Down→Up": COLORS["Bearish"]}
+        st.dataframe(
+            pcr_df.style.map(lambda v: f"background-color: {pcr_color[v]}; color: white; font-weight: 600"
+                             if v in pcr_color else "", subset=["Reversal"])
+            .format({"PCR at turn": "{:.4f}", "Latest PCR": "{:.4f}"}, na_rep="-"),
+            use_container_width=True, hide_index=True)
+        st.caption("Reversal = the latest 0DTE put-call snapshot changed the ratio's direction. Up→Down (was rising, "
+                   "now falling) is green; Down→Up (was falling, now rising) is red. 'No change' = the latest "
+                   "snapshot did not reverse it (or no snapshots are stored yet; the Volume History page writes them).")

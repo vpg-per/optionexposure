@@ -22,19 +22,18 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from db import insert_snapshot
 from gex_calculator import (
-    CBOE_INDEX_SYMBOLS,
     VOLUME_SCOPES,
     fetch_chain,
     utc_naive_to_eastern_naive,
-    volume_by_scope,
 )
 from service.pcrAnalysis import (
     load_pcr_snapshots,
     pcr_change_info,
     pcr_reversal_info,
 )
+from service.pcrView import render_change_metrics, render_reversal_metric
+from service.uiCommon import PRESETS, pick_symbol, save_snapshots
 
 st.set_page_config(page_title="Volume", layout="wide")
 
@@ -42,13 +41,6 @@ st.set_page_config(page_title="Volume", layout="wide")
 # Controls (main page, not sidebar): these only apply to this page
 # --------------------------------------------------------------------------
 st.title("Volume History")
-
-PRESETS = {
-    "SPY": ("SPY", False),
-    "QQQ": ("QQQ", False),
-    "IWM": ("IWM", False),
-    "Custom symbol": None,
-}
 
 utc_now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 eastern_now = utc_naive_to_eastern_naive(utc_now)
@@ -63,17 +55,7 @@ view_date = ctl_date.date_input("Market date (Eastern)", value=today_eastern)
 fetch_live = ctl_live.checkbox("Retrieve data", value=True)
 ctl_refresh.button("Refresh", type="primary", use_container_width=True)  # any click reruns the script
 
-if PRESETS[preset_label] is None:
-    cust_symbol, cust_index = st.columns([2, 3], vertical_alignment="bottom")
-    ticker = cust_symbol.text_input(
-        "Enter symbol (e.g. SPX, SPY, AAPL, TSLA)", value="SPY"
-    ).strip().upper()
-    is_index = cust_index.checkbox(
-        "This is a cash index (adds CBOE's leading underscore)",
-        value=ticker in CBOE_INDEX_SYMBOLS,
-    )
-else:
-    ticker, is_index = PRESETS[preset_label]
+ticker, is_index = pick_symbol(preset_label)
 
 scope_labels = dict(VOLUME_SCOPES)
 scope = st.radio(
@@ -95,18 +77,7 @@ if fetch_live:
     with st.spinner(f"Fetching latest chain for {ticker}..."):
         try:
             chain = fetch_chain(ticker=ticker, is_index=is_index, save_json=False)
-            # One row per scope (All / 0DTE / 1DTE / This Friday) so that
-            # history builds up for every view, not just the selected one.
-            for code, (c_vol, p_vol) in volume_by_scope(chain).items():
-                insert_snapshot(
-                    symbol=chain.ticker,
-                    scope=code,
-                    snapshot_at_utc=chain.as_of,
-                    spot=chain.spot,
-                    call_volume=c_vol,
-                    put_volume=p_vol,
-                    source="volume_history",
-                )
+            save_snapshots(chain, source="volume_history")
         except Exception as e:  # noqa: BLE001
             st.error(f"Could not fetch/store live data: {e}")
 
@@ -138,31 +109,8 @@ pcr_rev = pcr_reversal_info(df)
 # Rate of change of the put-call ratio: latest snapshot vs the one before it
 # (only snapshots that have a ratio count), so it updates as new data is read.
 m_latest, m_change, m_prev, m_rev = st.columns(4)
-if pcr_info["y"] is not None:
-    m_latest.metric("Put-call ratio (latest)", f"{pcr_info['y']:.4f}",
-                    help=f"Snapshot at {pd.Timestamp(pcr_info['x']):%H:%M} ET")
-if pcr_info["diff"] is None:
-    m_change.metric("Change vs previous snapshot", "n/a")
-    m_change.caption("Needs at least 2 snapshots with a put-call ratio.")
-else:
-    direction = pcr_info["state"]  # "Up" / "Down" / "No change"
-    pct = (f" ({pcr_info['diff'] / pcr_info['prev_y']:+.1%})" if pcr_info["prev_y"] else "")
-    # Streamlit colours a positive delta green; "inverse" makes a rising ratio red and a
-    # falling one green, matching the chart annotation. Unchanged = grey.
-    m_change.metric("Change vs previous snapshot", direction,
-                    delta=f"{pcr_info['diff']:+.4f}{pct}",
-                    delta_color="off" if pcr_info["state"] == "No change" else "inverse",
-                    help=f"{pd.Timestamp(pcr_info['prev_x']):%H:%M} -> {pd.Timestamp(pcr_info['x']):%H:%M} ET")
-    m_prev.metric("Previous put-call ratio", f"{pcr_info['prev_y']:.4f}",
-                  help=f"Snapshot at {pd.Timestamp(pcr_info['prev_x']):%H:%M} ET")
-
-# Reversal: shown only when the latest snapshot itself flipped the direction of the ratio.
-if pcr_rev["on_last"]:
-    m_rev.metric(f"PCR reversal ({pcr_rev['state']})", f"{pcr_rev['value']:.4f}",
-                 help=f"Turning point at {pd.Timestamp(pcr_rev['time']):%H:%M} ET, "
-                      "confirmed by the latest snapshot")
-else:
-    m_rev.metric("PCR reversal", "No change", help="The latest snapshot did not reverse the ratio's direction.")
+render_change_metrics(pcr_info, (m_latest, m_change, m_prev))
+render_reversal_metric(pcr_rev, m_rev)  # only when the latest snapshot flipped the ratio's direction
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df["downloaded_at"], y=df["spot"], name=f"{ticker} spot",

@@ -282,16 +282,14 @@ def show_key_strikes(symbol: str) -> None:
                 st.dataframe(top.style.format(fmt), use_container_width=True, hide_index=True)
 
     as_of_et = pd.Timestamp(lv["as_of"], tz="UTC").tz_convert(EASTERN)
-    note = (f"{lv['exp_label']} expiration ({', '.join(lv['expirations'])}) · spot ${lv['spot']:,.2f} · "
-            f"chain as of {as_of_et:%H:%M} ET. Put GEX is negative (dealer convention).")
-    if asof_et is not None:
-        note += " The option chain is always live: it does not follow the debug as-of time."
-    st.caption(note)
+    st.caption(f"{lv['exp_label']} expiration ({', '.join(lv['expirations'])}) · spot ${lv['spot']:,.2f} · "
+               f"chain as of {as_of_et:%H:%M} ET. Put GEX is negative (dealer convention).")
 
 
 if OPTIONS_SYMBOL in symbols:
     show_pcr_panel(OPTIONS_SYMBOL)
-    show_key_strikes(OPTIONS_SYMBOL)
+    if not debug_on:   # the option chain is always live, so it is hidden when viewing a past as-of time
+        show_key_strikes(OPTIONS_SYMBOL)
 
 # --------------------------------------------------------------------------
 # Next 3 candles (5 min) - heuristic scenario (logic: biasCalculator.project_next_candles)

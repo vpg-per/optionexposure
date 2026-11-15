@@ -30,17 +30,15 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
-from db import insert_snapshot
 from gex_calculator import (
-    CBOE_INDEX_SYMBOLS,
     compute_gex,
     default_expiration_selection,
     fetch_chain,
     label_expirations,
     list_expirations,
     nearest_strikes,
-    volume_by_scope,
 )
+from service.uiCommon import PRESETS, locate_preset, pick_symbol, save_snapshots
 
 st.set_page_config(page_title="Dashboard", layout="wide")
 
@@ -106,33 +104,12 @@ browser_tz = _get_browser_timezone()
 # --------------------------------------------------------------------------
 st.title("Gamma exposure (GEX) by strike")
 
-PRESETS = {
-    "SPY": ("SPY", False),
-    "QQQ": ("QQQ", False),
-    "IWM": ("IWM", False),
-    "Custom symbol": None,
-}
-
 # --- Read query parameters -------------------------------------------------
 qp = st.query_params
 qp_symbol = qp.get("symbol", "").strip().upper()
 qp_strikes = qp.get("strikes", "10").strip()
 
-# Default to SPY when no query-string symbol is provided
-DEFAULT_SYMBOL = "SPY"
-preset_index = list(PRESETS.keys()).index(DEFAULT_SYMBOL)
-custom_ticker_default = DEFAULT_SYMBOL
-custom_is_index_default = False
-
-if qp_symbol:
-    for i, (label, val) in enumerate(PRESETS.items()):
-        if val and val[0] == qp_symbol:
-            preset_index = i
-            break
-    else:
-        preset_index = list(PRESETS.keys()).index("Custom symbol")
-        custom_ticker_default = qp_symbol
-        custom_is_index_default = qp_symbol in CBOE_INDEX_SYMBOLS
+preset_index, custom_ticker_default, custom_is_index_default = locate_preset(qp_symbol)
 
 ctl_symbol, ctl_strikes, ctl_load = st.columns([2, 2, 1], vertical_alignment="bottom")
 
@@ -147,18 +124,7 @@ min_oi = strike_window = ctl_strikes.number_input(
 
 load = ctl_load.button("Load / refresh chain", type="primary", use_container_width=True)
 
-if PRESETS[preset_label] is None:
-    cust_symbol, cust_index = st.columns([2, 3], vertical_alignment="bottom")
-    ticker = cust_symbol.text_input(
-        "Enter symbol (e.g. SPX, SPY, AAPL, TSLA)",
-        value=custom_ticker_default,
-    ).strip().upper()
-    is_index = cust_index.checkbox(
-        "This is a cash index (adds CBOE's leading underscore)",
-        value=custom_is_index_default or (ticker in CBOE_INDEX_SYMBOLS),
-    )
-else:
-    ticker, is_index = PRESETS[preset_label]
+ticker, is_index = pick_symbol(preset_label, custom_ticker_default, custom_is_index_default)
 
 # Sync effective symbol / strikes back to URL query string
 if qp_symbol != ticker:
@@ -192,18 +158,8 @@ if should_fetch:
     # Persist this snapshot (spot, call/put volume, timestamp) to Neon.
     # Only runs when a fetch actually happened -- not on every widget rerun.
     if st.session_state.chain is not None:
-        _c = st.session_state.chain
         try:
-            for _code, (_cv, _pv) in volume_by_scope(_c).items():
-                insert_snapshot(
-                    symbol=_c.ticker,
-                    snapshot_at_utc=_c.as_of,
-                    spot=_c.spot,
-                    call_volume=_cv,
-                    put_volume=_pv,
-                    source="dashboard",
-                    scope=_code,
-                )
+            save_snapshots(st.session_state.chain, source="dashboard")
         except Exception as db_err:  # noqa: BLE001
             st.warning(f"Could not save snapshot to database: {db_err}")
 

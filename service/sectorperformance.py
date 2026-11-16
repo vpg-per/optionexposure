@@ -40,6 +40,12 @@ DOWN_COLOR = "#d73027"
 FLAT_COLOR = "#999999"
 SHADE_COLOR = "#f2f2f2"
 
+# Line chart shows only the strongest and weakest sectors (by % change vs
+# yesterday's regular-hours close, the same number shown in the side table).
+# Every sector is still fetched, calculated and listed in the table.
+CHART_TOP_N = 3
+CHART_BOTTOM_N = 2
+
 SMOOTH_BARS = 3              # rolling-mean window; 1 disables smoothing
 LABEL_GAP_PAD_FACTOR = 1.25  # breathing room on top of the measured label height
 LABEL_FONTSIZE = 8.5
@@ -84,6 +90,23 @@ def _pct_change_since_prev_close(sym, df, midnight):
     print(f"{sym}, prev_close: {prev_close}, cur_price:{latest}, "
           f"change: {latest - prev_close:.2f}, percent: {pct:.2f}")
     return float(prev_close), float(latest), float(pct)
+
+
+def select_chart_symbols(stats, candidates=PLOTTED_SYMS,
+                         top_n=CHART_TOP_N, bottom_n=CHART_BOTTOM_N):
+    """Symbols to draw on the line chart: the `top_n` highest and `bottom_n`
+    lowest % change among `candidates`, returned as (shown, top, bottom).
+    Sectors without a % change can't be ranked; if none can (no prior-day
+    data), every candidate is drawn so the chart never ends up empty."""
+    ranked = sorted((s for s in candidates if stats.get(s) is not None),
+                    key=lambda s: stats[s][2], reverse=True)
+    if not ranked:
+        return list(candidates), [], []
+    if len(ranked) <= top_n + bottom_n:
+        top, bottom = ranked[:top_n], ranked[top_n:]
+    else:
+        top, bottom = ranked[:top_n], ranked[-bottom_n:] if bottom_n else []
+    return top + bottom, top, bottom
 
 
 def _min_label_gap(fig, ax, y_range):
@@ -225,9 +248,10 @@ def generate_sector_chart(
     # ---- lines + stats ----
     stats = {sym: _pct_change_since_prev_close(sym, fetched[sym], midnight)
              for sym in SECTOR_NAMES}
+    chart_syms, top_syms, bottom_syms = select_chart_symbols(stats)
     series = []  # (sym, last_x, last_y)
     all_values = []
-    for sym in PLOTTED_SYMS:
+    for sym in chart_syms:
         full_df = fetched[sym]
         if full_df is None:
             continue
@@ -282,8 +306,10 @@ def generate_sector_chart(
         ax.spines[side].set_visible(False)
     for side in ("right", "bottom"):
         ax.spines[side].set_color("#d9d9d9")
-    ax.set_title("SECTOR ETFS Comparison chart",
-                 color=BLUE_LBL, fontsize=11, fontweight="bold", loc="left")
+    title = "SECTOR ETFS Comparison chart"
+    if top_syms or bottom_syms:
+        title += f"  (top {len(top_syms)} / bottom {len(bottom_syms)} by % change)"
+    ax.set_title(title, color=BLUE_LBL, fontsize=11, fontweight="bold", loc="left")
 
     _draw_side_panel(ax_table, stats)
 

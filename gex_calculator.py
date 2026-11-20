@@ -49,7 +49,6 @@ from scipy.stats import norm
 
 CONTRACT_SIZE = 100
 CBOE_BASE_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
-USER_AGENT = "Mozilla/5.0 (compatible; gex-dashboard/1.0)"
 DEFAULT_JSON_SAVE_DIR = "cboe_data"
 EASTERN_TZ = ZoneInfo("America/New_York")
 
@@ -195,7 +194,13 @@ def fetch_cboe_json(
     """
     url = CBOE_BASE_URL.format(symbol=symbol)
     sess = session or requests
-    resp = sess.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "application/json",
+        "Referer": "https://www.cboe.com/",
+    }
+    resp = sess.get(url, headers=headers, timeout=timeout)
     resp.raise_for_status()
     payload = resp.json()
     if "data" not in payload or "options" not in payload["data"]:

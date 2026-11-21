@@ -60,7 +60,7 @@ if "bias_refresh_key" not in st.session_state:
     st.session_state.bias_refresh_key = 0
 
 ctl_symbols, ctl_refresh = st.columns([5, 1], vertical_alignment="bottom")
-raw_symbols = ctl_symbols.text_input("Symbols (comma-separated)", value="SPY, GLD, IWM, GLD")
+raw_symbols = ctl_symbols.text_input("Symbols (comma-separated)", value="SPY, GLD, IWM, QQQ")
 if ctl_refresh.button("Refresh", type="primary", use_container_width=True):
     st.session_state.bias_refresh_key += 1
 

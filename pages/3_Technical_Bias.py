@@ -6,19 +6,22 @@ Bars come from service.alaDataManager (5-min bars, closed bars only); the
 larger timeframes are resampled from them (4h bars start at 01/05/09/13/17/21 ET).
 Calculation rules live in service/biasCalculator.py (ported from dataAnalyzer.py).
 
-Page order: MACD/RSI trend tables -> 0DTE put-call ratio panel -> key option strikes
+Page order: MACD/RSI trend tables -> price levels (PDH/PDL, pre-market, opening range, ...)
+-> 0DTE put-call ratio panel -> key option strikes
 -> next-3-candles projection -> detail / debug tables.
 
 Debug mode: tick "Debug: as-of time" to see the bias exactly as it would have
 looked at a past Eastern date/time (only bars closed by then are used).
 """
 import datetime as dt
+import html
 import re
 
 import pandas as pd
 import streamlit as st
 
 from service.alaDataManager import EASTERN, fetch_stock_data, resample_bars
+from service.levels import build_levels, levels_summary
 from service.optionLevels import RANK_MODES, TOP_N, load_level_table, top_strikes
 from service.pcrAnalysis import ZERO_DTE_SCOPE, load_pcr_snapshots, pcr_change_info, pcr_reversal_info
 from service.pcrView import render_change_metrics
@@ -34,7 +37,7 @@ from service.biasCalculator import (
 )
 
 st.set_page_config(page_title="Technical", layout="wide")
-st.title("Technical Bias (MACD / RSI)")
+st.title("Technical Bias")
 
 TIMEFRAMES = [("5 min", "5min"), ("15 min", "15min"), ("30 min", "30min"),
               ("1 hr", "1h"), ("4 hr", "4h")]
@@ -57,7 +60,7 @@ if "bias_refresh_key" not in st.session_state:
     st.session_state.bias_refresh_key = 0
 
 ctl_symbols, ctl_refresh = st.columns([5, 1], vertical_alignment="bottom")
-raw_symbols = ctl_symbols.text_input("Symbols (comma-separated)", value="SPY, GLD")
+raw_symbols = ctl_symbols.text_input("Symbols (comma-separated)", value="SPY, GLD, IWM, GLD")
 if ctl_refresh.button("Refresh", type="primary", use_container_width=True):
     st.session_state.bias_refresh_key += 1
 
@@ -93,12 +96,13 @@ if not symbols:
 # --------------------------------------------------------------------------
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def load_symbol_bias(symbol: str, refresh_key: int, asof_iso: str | None,
-                     lookback_days: int) -> tuple[list[dict], list[str], pd.DataFrame]:
+                     lookback_days: int) -> tuple[list[dict], list[str], pd.DataFrame, dict | None]:
     """One 5-min fetch per symbol; every other timeframe is resampled from it.
     refresh_key only exists so the Refresh button yields a new cache entry.
     asof_iso (debug): ISO timestamp with offset; only 5-min bars that had closed
     by then are kept, so the result is the bias as it stood at that moment.
-    Returns (rows, skipped-timeframe messages, last BARS_KEPT 5-min bars with indicators)."""
+    Returns (rows, skipped-timeframe messages, last BARS_KEPT 5-min bars with indicators,
+    price levels {"sr": SupportResistance, "last_close": float} or None)."""
     base = fetch_stock_data(symbol, "5min", lookback_days=lookback_days)
     if asof_iso:
         base = base[base.index + pd.Timedelta("5min") <= pd.Timestamp(asof_iso)]
@@ -108,6 +112,18 @@ def load_symbol_bias(symbol: str, refresh_key: int, asof_iso: str | None,
 
     rows, notes = [], []
     frame5m = pd.DataFrame()
+
+    # Price levels (service/levels.py) from the FULL fetched history (not the 300-bar tail),
+    # as of the end of the last closed bar, so debug as-of mode shows the levels of that moment.
+    levels_info = None
+    try:
+        # Trading day = the as-of date in debug mode (not the last bar's date), so a past
+        # moment only uses families whose data exists by then; live uses the last bar's date.
+        level_day = pd.Timestamp(asof_iso).date() if asof_iso else base.index[-1].date()
+        sr = build_levels(base, level_day, base_last_end)
+        levels_info = {"sr": sr, "last_close": round(float(base["close"].iloc[-1]), 2)}
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"{symbol} levels unavailable: {e}")
     for label, rule in TIMEFRAMES:
         if rule == "5min":
             frame = base
@@ -127,7 +143,7 @@ def load_symbol_bias(symbol: str, refresh_key: int, asof_iso: str | None,
         snap = latest_snapshot(bias_frame)
         rows.append({"symbol": symbol, "timeframe": label,
                      "data_through": base_last_end, **snap})
-    return rows, notes, frame5m
+    return rows, notes, frame5m, levels_info
 
 
 # History must reach back LOOKBACK_DAYS before the as-of time, not just before today.
@@ -135,13 +151,14 @@ extra_days = (now_et.date() - asof_et.date()).days + 1 if asof_et is not None el
 lookback_days = LOOKBACK_DAYS + extra_days
 asof_iso = asof_et.isoformat() if asof_et is not None else None
 
-all_rows, notes, errors, frames5m = [], [], [], {}
+all_rows, notes, errors, frames5m, levels_by_symbol = [], [], [], {}, {}
 with st.spinner("Fetching bars and calculating bias..."):
     for sym in symbols:
         try:
-            rows, skipped, f5m = load_symbol_bias(sym, st.session_state.bias_refresh_key,
-                                                  asof_iso, lookback_days)
+            rows, skipped, f5m, lvl_info = load_symbol_bias(sym, st.session_state.bias_refresh_key,
+                                                            asof_iso, lookback_days)
             frames5m[sym] = f5m
+            levels_by_symbol[sym] = lvl_info
             all_rows.extend(rows)
             notes.extend(skipped)
         except Exception as e:  # noqa: BLE001
@@ -200,11 +217,71 @@ def show_pivot(title: str, column: str) -> None:
 
 col_macd, col_rsi = st.columns(2)
 with col_macd:
-    show_pivot("MACD trend", "macd_trend")
+    show_pivot("macd", "macd_trend")
 with col_rsi:
-    show_pivot("RSI trend", "rsi_trend")
+    show_pivot("rsi", "rsi_trend")
 st.caption("Cell text = start time (ET) of the last closed bar. Colour: green = Bullish, "
            "red = Bearish, grey = Neutral. Exact values are in the detail table below.")
+
+
+# --------------------------------------------------------------------------
+# Price levels (logic: service/levels.py)
+# --------------------------------------------------------------------------
+def _beyond_note(summ: dict, bias: str) -> str:
+    """Hint when price is above/below every named level (extension levels are already in the row)."""
+    if not (summ["above_all"] or summ["below_all"]) or not summ["edge"]:
+        return ""
+    lbl, px = summ["edge"]
+    up = summ["above_all"]
+    if bias == ("Bullish" if up else "Bearish"):
+        return f"{'Above' if up else 'Below'} all levels, 5m {bias.lower()}: continuation; stop ref {lbl} {px:.2f}"
+    return (f"{'Above' if up else 'Below'} all levels, 5m {bias.lower()}: stretched; "
+            f"watch retest of {lbl} {px:.2f}")
+
+
+def show_price_levels() -> None:
+    st.subheader("Price levels")
+    rows = []
+    for sym in symbols:
+        info = levels_by_symbol.get(sym)
+        if not info:
+            continue
+        summ = levels_summary(info["sr"], info["last_close"])
+        b = detail.loc[(detail["symbol"] == sym) & (detail["timeframe"] == "5 min"), "overall_bias"]
+        rows.append({"Symbol": sym, "Price": f"{info['last_close']:,.2f}", "Levels": summ["text"],
+                     "Note": _beyond_note(summ, b.iloc[0] if not b.empty else "Neutral")})
+    if not rows:
+        st.info("No price levels available.")
+        return
+    table = pd.DataFrame(rows)
+    if not table["Note"].any():
+        table = table.drop(columns="Note")
+    # One line per symbol: HTML table with nowrap cells; scrolls sideways instead of wrapping.
+    head = "".join(f"<th>{html.escape(c)}</th>" for c in table.columns)
+    body = "".join("<tr>" + "".join(f"<td>{html.escape(str(v))}</td>" for v in r) + "</tr>"
+                   for r in table.itertuples(index=False))
+    st.markdown(
+        "<style>.lvl-wrap{overflow-x:auto}"
+        ".lvl{border-collapse:collapse;font-size:0.9rem;width:100%}"
+        ".lvl th,.lvl td{white-space:nowrap;padding:4px 12px;text-align:left;"
+        "border-bottom:1px solid rgba(128,128,128,.3)}"
+        ".lvl th{font-weight:600}</style>"
+        f"<div class='lvl-wrap'><table class='lvl'><thead><tr>{head}</tr></thead>"
+        f"<tbody>{body}</tbody></table></div>",
+        unsafe_allow_html=True)
+    if asof_et is not None:   # debug: say exactly which level families the as-of data supports
+        avail = list(dict.fromkeys(k for s_ in symbols if levels_by_symbol.get(s_)
+                                   for k in levels_by_symbol[s_]["sr"].labeled() if k != "P"))
+        st.caption(f"Debug as-of {asof_et:%Y-%m-%d %H:%M} ET: only bars closed by then are used. "
+                   f"Levels available: {', '.join(avail) or '-'}.")
+    # st.caption("Price = last closed 5-min bar. R = resistance above, S = support below, nearest first "
+    #            "(2 per side before 10:00 ET, 3 after), listed in order R1, R2, R3 | S1, S2, S3; levels within 0.03% are merged (e.g. PDL+PML). "
+    #            "PDH/PDL/PDC = previous regular session; PMH/PML = pre-market (from 09:30); "
+    #            "ORH/ORL = 09:30-10:00 range (from 10:00); DH/DL = day high/low incl. pre-market (from 13:00). "
+    #            "Beyond all levels, R/S are topped up with PR2/PS2 (pivot R2/S2), 5DH/5DL (5-day high/low), "
+    #            "ORM+/ORM- (opening-range measured move). Context only, not trade advice.")
+
+show_price_levels()
 
 
 # --------------------------------------------------------------------------
@@ -235,7 +312,7 @@ def load_key_levels(symbol: str, refresh_key: int) -> dict:
 
 
 def show_pcr_panel(symbol: str) -> None:
-    st.subheader(f"{symbol} 0DTE put-call ratio: reversal & change")
+    st.subheader(f"{symbol} pcr: reversal & change")
     pcr_day = (asof_et or pd.Timestamp(now_et)).date()
     try:
         p = load_pcr_panel(symbol, st.session_state.bias_refresh_key, pcr_day.isoformat(), asof_iso)

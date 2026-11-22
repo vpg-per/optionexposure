@@ -275,12 +275,12 @@ def show_price_levels() -> None:
                                    for k in levels_by_symbol[s_]["sr"].labeled() if k != "P"))
         st.caption(f"Debug as-of {asof_et:%Y-%m-%d %H:%M} ET: only bars closed by then are used. "
                    f"Levels available: {', '.join(avail) or '-'}.")
-    st.caption("Price = last closed 5-min bar. R = resistance above, S = support below, nearest first "
-               "(2 per side before 10:00 ET, 3 after), listed in order R1, R2, R3 | S1, S2, S3; levels within 0.03% are merged (e.g. PDL+PML). "
-               "PDH/PDL/PDC = previous regular session; PMH/PML = pre-market (from 09:30); "
-               "ORH/ORL = 09:30-10:00 range (from 10:00); DH/DL = day high/low incl. pre-market (from 13:00). "
-               "Beyond all levels, R/S are topped up with PR2/PS2 (pivot R2/S2), 5DH/5DL (5-day high/low), "
-               "ORM+/ORM- (opening-range measured move). Context only, not trade advice.")
+    # st.caption("Price = last closed 5-min bar. R = resistance above, S = support below, nearest first "
+    #            "(2 per side before 10:00 ET, 3 after), listed in order R1, R2, R3 | S1, S2, S3; levels within 0.03% are merged (e.g. PDL+PML). "
+    #            "PDH/PDL/PDC = previous regular session; PMH/PML = pre-market (from 09:30); "
+    #            "ORH/ORL = 09:30-10:00 range (from 10:00); DH/DL = day high/low incl. pre-market (from 13:00). "
+    #            "Beyond all levels, R/S are topped up with PR2/PS2 (pivot R2/S2), 5DH/5DL (5-day high/low), "
+    #            "ORM+/ORM- (opening-range measured move). Context only, not trade advice.")
 
 show_price_levels()
 

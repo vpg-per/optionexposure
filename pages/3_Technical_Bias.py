@@ -18,6 +18,7 @@ import html
 import re
 
 import pandas as pd
+import altair as alt
 import streamlit as st
 
 from service.alaDataManager import EASTERN, fetch_stock_data, resample_bars
@@ -37,7 +38,7 @@ from service.biasCalculator import (
 )
 
 st.set_page_config(page_title="Technical", layout="wide")
-st.title("Technical Bias")
+st.title("Technical Bias (MACD / RSI)")
 
 TIMEFRAMES = [("5 min", "5min"), ("15 min", "15min"), ("30 min", "30min"),
               ("1 hr", "1h"), ("4 hr", "4h")]
@@ -217,9 +218,9 @@ def show_pivot(title: str, column: str) -> None:
 
 col_macd, col_rsi = st.columns(2)
 with col_macd:
-    show_pivot("macd", "macd_trend")
+    show_pivot("MACD trend", "macd_trend")
 with col_rsi:
-    show_pivot("rsi", "rsi_trend")
+    show_pivot("RSI trend", "rsi_trend")
 st.caption("Cell text = start time (ET) of the last closed bar. Colour: green = Bullish, "
            "red = Bearish, grey = Neutral. Exact values are in the detail table below.")
 
@@ -274,12 +275,12 @@ def show_price_levels() -> None:
                                    for k in levels_by_symbol[s_]["sr"].labeled() if k != "P"))
         st.caption(f"Debug as-of {asof_et:%Y-%m-%d %H:%M} ET: only bars closed by then are used. "
                    f"Levels available: {', '.join(avail) or '-'}.")
-    # st.caption("Price = last closed 5-min bar. R = resistance above, S = support below, nearest first "
-    #            "(2 per side before 10:00 ET, 3 after), listed in order R1, R2, R3 | S1, S2, S3; levels within 0.03% are merged (e.g. PDL+PML). "
-    #            "PDH/PDL/PDC = previous regular session; PMH/PML = pre-market (from 09:30); "
-    #            "ORH/ORL = 09:30-10:00 range (from 10:00); DH/DL = day high/low incl. pre-market (from 13:00). "
-    #            "Beyond all levels, R/S are topped up with PR2/PS2 (pivot R2/S2), 5DH/5DL (5-day high/low), "
-    #            "ORM+/ORM- (opening-range measured move). Context only, not trade advice.")
+    st.caption("Price = last closed 5-min bar. R = resistance above, S = support below, nearest first "
+               "(2 per side before 10:00 ET, 3 after), listed in order R1, R2, R3 | S1, S2, S3; levels within 0.03% are merged (e.g. PDL+PML). "
+               "PDH/PDL/PDC = previous regular session; PMH/PML = pre-market (from 09:30); "
+               "ORH/ORL = 09:30-10:00 range (from 10:00); DH/DL = day high/low incl. pre-market (from 13:00). "
+               "Beyond all levels, R/S are topped up with PR2/PS2 (pivot R2/S2), 5DH/5DL (5-day high/low), "
+               "ORM+/ORM- (opening-range measured move). Context only, not trade advice.")
 
 show_price_levels()
 
@@ -312,7 +313,7 @@ def load_key_levels(symbol: str, refresh_key: int) -> dict:
 
 
 def show_pcr_panel(symbol: str) -> None:
-    st.subheader(f"{symbol} pcr: reversal & change")
+    st.subheader(f"{symbol} 0DTE put-call ratio: reversal & change")
     pcr_day = (asof_et or pd.Timestamp(now_et)).date()
     try:
         p = load_pcr_panel(symbol, st.session_state.bias_refresh_key, pcr_day.isoformat(), asof_iso)
@@ -347,20 +348,51 @@ def show_key_strikes(symbol: str) -> None:
         st.warning(f"{symbol} option levels: {e}")
         return
 
-    fmt = {"Volume": "{:,.0f}", "Open int.": "{:,.0f}", "GEX ($mm)": "{:,.1f}"}
-    col_calls, col_puts = st.columns(2)
-    for col, side, title in ((col_calls, "call", "Calls"), (col_puts, "put", "Puts")):
-        with col:
-            st.markdown(f"**{title}**")
-            top = top_strikes(lv["by_strike"], lv["spot"], side, TOP_N, rank_by)
-            if top.empty:
-                st.info(f"No {side} volume / GEX found.")
-            else:
-                st.dataframe(top.style.format(fmt), use_container_width=True, hide_index=True)
+    # Compact diverging bar chart: calls up (green), puts down (red), spot as a dashed vertical line.
+    metric = "GEX ($mm)" if rank_by == "GEX" else "Volume"
+    rows, tables = [], {}
+    for side, label in (("call", "Call"), ("put", "Put")):
+        top = top_strikes(lv["by_strike"], lv["spot"], side, TOP_N, rank_by)
+        tables[label] = top
+        for r in top.to_dict("records"):
+            rows.append({"Strike": float(r["Strike"]), "Side": label,
+                         "Bar": abs(float(r[metric])) * (1 if side == "call" else -1),
+                         "Volume": float(r["Volume"]), "OI": float(r["Open int."]),
+                         "GEX": float(r["GEX ($mm)"])})
+    if not rows:
+        st.info("No call / put volume or GEX found.")
+    else:
+        chart_df, spot = pd.DataFrame(rows), float(lv["spot"])
+        strikes = chart_df["Strike"].tolist() + [spot]
+        pad = max(0.5, (max(strikes) - min(strikes)) * 0.08)
+        xs = alt.X("Strike:Q", title=None, scale=alt.Scale(domain=[min(strikes) - pad, max(strikes) + pad], nice=False),
+                   axis=alt.Axis(values=sorted(set(chart_df["Strike"])), format="~g", labelFontSize=10, grid=False))
+        base = alt.Chart(chart_df).encode(x=xs)
+        bars = base.mark_bar(size=18).encode(
+            y=alt.Y("Bar:Q", title=metric.split(" ")[0], axis=alt.Axis(labelExpr="format(abs(datum.value), '~s')",
+                                                                        labelFontSize=10, titleFontSize=10, tickCount=3)),
+            color=alt.Color("Side:N", legend=None,
+                            scale=alt.Scale(domain=["Call", "Put"], range=[COLORS["Bullish"], COLORS["Bearish"]])),
+            tooltip=[alt.Tooltip("Strike:Q", format="~g"), "Side:N", alt.Tooltip("Volume:Q", format=",.0f"),
+                     alt.Tooltip("OI:Q", title="Open int.", format=",.0f"), alt.Tooltip("GEX:Q", title="GEX ($mm)", format=",.1f")])
+        spot_df = pd.DataFrame({"s": [spot]})
+        rule = alt.Chart(spot_df).mark_rule(color="#f5a623", strokeDash=[4, 3], strokeWidth=2).encode(x="s:Q")
+        tag = alt.Chart(spot_df).mark_text(color="#f5a623", align="left", dx=4, fontSize=11, fontWeight="bold",
+                                           y=0).encode(x="s:Q", text=alt.value(f"${spot:,.2f}"))
+        zero = alt.Chart(pd.DataFrame({"z": [0]})).mark_rule(color="#888", strokeWidth=1).encode(y="z:Q")
+        st.altair_chart((zero + bars + rule + tag).properties(height=140), use_container_width=True)
+        with st.expander("Strike table", expanded=False):
+            fmt = {"Volume": "{:,.0f}", "Open int.": "{:,.0f}", "GEX ($mm)": "{:,.1f}"}
+            col_calls, col_puts = st.columns(2)
+            for col, label in ((col_calls, "Call"), (col_puts, "Put")):
+                with col:
+                    st.markdown(f"**{label}s**")
+                    if not tables[label].empty:
+                        st.dataframe(tables[label].style.format(fmt), use_container_width=True, hide_index=True)
 
     as_of_et = pd.Timestamp(lv["as_of"], tz="UTC").tz_convert(EASTERN)
     st.caption(f"{lv['exp_label']} expiration ({', '.join(lv['expirations'])}) · spot ${lv['spot']:,.2f} · "
-               f"chain as of {as_of_et:%H:%M} ET. Put GEX is negative (dealer convention).")
+               f"chain as of {as_of_et:%H:%M} ET. Bars = {metric}; orange line = spot.")
 
 
 if OPTIONS_SYMBOL in symbols:

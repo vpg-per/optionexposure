@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from gex_calculator import compute_gex, fetch_chain, list_expirations, utc_naive_to_eastern_naive
+from service.gex_calculator import compute_gex, fetch_chain, list_expirations, utc_naive_to_eastern_naive
 
 TOP_N = 3
 # Ranking options shown on the page. Combined = 50% volume + 50% |GEX|, each scaled to its max.

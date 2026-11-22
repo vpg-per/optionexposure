@@ -8,7 +8,7 @@ from __future__ import annotations
 import streamlit as st
 
 from db import insert_snapshot
-from gex_calculator import CBOE_INDEX_SYMBOLS, volume_by_scope
+from service.gex_calculator import CBOE_INDEX_SYMBOLS, volume_by_scope
 
 # label -> (ticker, is_index); None = custom symbol typed by the user
 PRESETS = {

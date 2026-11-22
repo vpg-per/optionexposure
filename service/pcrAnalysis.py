@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from db import load_snapshots
-from gex_calculator import VOLUME_SCOPES
+from service.gex_calculator import VOLUME_SCOPES
 
 GREEN, RED = "#2ECC71", "#E74C3C"
 

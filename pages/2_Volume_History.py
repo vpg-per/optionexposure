@@ -22,7 +22,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from gex_calculator import (
+from service.gex_calculator import (
     VOLUME_SCOPES,
     fetch_chain,
     utc_naive_to_eastern_naive,
@@ -178,6 +178,9 @@ def render_png_matplotlib(df_plot: pd.DataFrame, ticker_label: str, scope_text: 
     png_meta = {
         "PCR_STATE": info["state"],
         "PCR_DIFF": "NA" if info["diff"] is None else f"{info['diff']:+.4f}",
+        "PCR_CURTIME" : "NA" if info["x"] is None else f"{info['x']}",
+        "PCR_CURRENT" : "NA" if info["y"] is None else f"{info['y']}",
+        "PCR_LAST" : "NA" if info["prev_y"] is None else f"{info['prev_y']}",
     }
     fig_mpl.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", metadata=png_meta)
     plt.close(fig_mpl)
